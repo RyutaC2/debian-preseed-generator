@@ -1,1 +1,2762 @@
+# Debian 13.5 / amd64 / netinst / サーバー用のPreseed YAML設計案
+# 採用範囲の具体的な項目・選択肢を収録。このスキーマの読込・cfg生成は未実装。
+# schema_versionはツール独自の形式の版。Debianの版ではない。
+#
+# 方針:
+# - YAMLに表示名・候補・固定値・質問／出力条件を保持する。
+# - GoがHuhの質問、検証、導出、ハッシュ化、text/templateによるcfg出力を担当する。
+# - answer.kindはselect / multiselect / input / text / boolean / none。
+# - noneは質問なし。value、value_from、value_resolverのいずれかで値を決める。
+# - hiddenは入力のマスク、confirmは確認入力。両方とも秘密値をログに残さない。
+# - 固定値valueと初期値defaultを区別する。未指定と空文字列も区別する。
+# - preseedはowner / key / typeと値を明示。空配列はUI専用の設定。
+# - 条件が偽なら質問と出力を省略。親を変更したら依存する回答を再検証する。
+# - whenは{setting, equals}、{all: [...]}, {any: [...]}, {not: ...}。
+#   attributeがあれば選択されたcatalog候補の属性を比較する。
+# - *_resolverはGo側の登録済み処理名。inputsの値はsetting idへの参照。
+#   resolver_optionsは固定引数。任意のGo式やシェル式は評価しない。
+# - choices_fromはcatalog名。choices_resolverは登録済みの候補絞り込み。
+# - navigationは複数のHuh Selectを組み合わせる専用フロー。Huh標準のYAML機能ではない。
+# - validation / transformもGo側の登録済み処理。追加実装が必要。
+# - multiselectの連結は各出力のseparatorに従う。booleanはtrue/falseで出力。
+# - kernel/image、UID、初期グループ、IPv6など採用しないキーは出力しない。
+#
+schema_version: 1
+status: draft
+target:
+  debian_version: '13.5'
+  codename: trixie
+  architecture: amd64
+  media: netinst
+  purpose: server
+  media_filename: debian-13.5.0-amd64-netinst.iso
+scope:
+  decided:
+    localization: 本家に似た言語・地域・キーボード選択。国は階層選択を含む
+    network: 有線。DHCP または固定 IPv4
+    accounts: root のみ / root と一般ユーザー / 一般ユーザーと sudo
+    passwords: 非表示入力・確認入力後、SHA-512 crypt で出力
+    timezone: 国に応じた初期候補を提示し、変更可能。UTC も選択可能
+    hardware_clock: UTC として扱う設定を質問せず出力
+    ntp: インストール中の同期。有効 / 無効を選択。既定は有効
+    ntp_server: 既定サーバー、または任意のサーバーを入力
+    disk: 対象ディスクを明示入力し、ディスク全体を使用
+    partitioning: 通常のパーティション / LVM。レイアウトは本家の既定レシピから選択
+    lvm_size: 全容量 / 容量指定 / 割合指定
+    use_mirror: 使用する / しないを選択。既定は使用する
+    mirror: deb.debian.org を初期値とし、任意のホスト・ディレクトリへ変更可能
+    http_proxy: 任意入力。空欄なら使用しない
+    mirror_suite: trixie を質問せず出力
+    apt_services: security / updates を複数選択。既定は両方有効
+    non_free_firmware: 有効 / 無効を選択。既定は有効
+    contrib: 有効 / 無効を選択。既定は無効
+    non_free: 有効 / 無効を選択。既定は無効
+    scan_additional_media: 追加メディアの走査を行わない設定を質問せず出力
+    tasks: 標準ユーティリティ / SSH サーバー / Web サーバーを複数選択。既定は標準ユーティリティ
+    additional_packages: パッケージ名を空白区切りで任意入力
+    install_recommends: 推奨パッケージをインストールする設定を質問せず出力
+    kernel: インストーラーの自動選択を使用
+    package_upgrade: none / safe-upgrade / full-upgrade を選択。既定は none
+    popularity_contest: パッケージ利用統計の送信は無効を質問せず出力
+    bootloader: GRUB をインストール。インストール先は OS の対象ディスクを基準に設定
+    boot_mode: UEFI / BIOS はインストーラーの起動方式に合わせる
+    finish_action: 再起動 / 停止 / 電源 OFF を選択。既定は再起動
+    eject_media: メディア取り出しの有効 / 無効を選択。既定は有効
+    finish_message: 最後の完了メッセージで質問せず進む設定を出力
+    late_command: 終了直前の独自コマンドを任意の複数行入力。空欄なら出力しない
+    preseed_loading: ローカルファイル / URL の両方を想定
+    generated_artifacts: cfg と読み込み方法に応じた起動引数の例を出力
+    url_static_network: URL 取得前に必要な固定 IPv4 設定を起動引数の例へ含める
+    additional_locales: 任意の複数選択。既定は追加なし
+    keyboard_toggle: 非ラテン配列の切替が必要な場合だけ質問
+    user_uid: Debian の既定値を使用
+    user_groups: Debian の既定値を使用
+  deferred:
+  - IPv6 の設定 UI
+  - 無線ネットワーク設定
+  - ディスク暗号化・RAID・独自レシピ・空き領域のみの使用
+  - 独自 APT リポジトリ・multiarch
+  - GRUB パスワード・追加カーネル引数
+  - 読み込み直後・ディスク分割前の独自コマンド
+  - 別の Preseed ファイルの読み込み・外部スクリプト実行
+  - インストーラーへの SSH 接続
+  - ISO の再作成・Preseed 配布サーバーの構築
+  - 一般ユーザーの UID・初期グループの指定
+  pending: []
+sources:
+  installation_guide: https://www.debian.org/releases/trixie/amd64/apbs04.en.html
+  loading_guide: https://www.debian.org/releases/trixie/amd64/apbs02.en.html
+  iso: https://cdimage.debian.org/mirror/cdimage/archive/13.5.0/amd64/iso-cd/debian-13.5.0-amd64-netinst.iso
+  iso_package_list: https://cdimage.debian.org/mirror/cdimage/archive/13.5.0/amd64/list-cd/debian-13.5.0-amd64-netinst.list.gz
+  catalog_data:
+  - package: localechooser
+    version: '2.112'
+    files:
+    - usr/share/localechooser/languagelist
+    - usr/share/localechooser/languagelist.data.gz
+    - etc/SUPPORTED-short
+    - DEBIAN/templates
+  - package: console-setup-udeb
+    version: 1.242~deb13u1
+    files:
+    - DEBIAN/templates
+    - usr/share/console-setup/keyboard-configuration.config
+  - package: tzsetup-udeb
+    version: 0.132+deb13u1
+    files:
+    - DEBIAN/templates
+    - usr/share/tzsetup/tzmap
+  - package: tzdata
+    version: 2026b-0+deb13u1
+    files:
+    - usr/share/zoneinfo/zone.tab
+    - usr/share/zoneinfo/
+  - package: locales
+    version: 2.41-12+deb13u3
+    files:
+    - usr/share/i18n/SUPPORTED
+  - package: partman-auto
+    version: '177'
+    files:
+    - lib/partman/recipes-amd64/
+    - lib/partman/recipes-amd64-efi/
+  - package: grub-installer
+    version: '1.212'
+    files:
+    - usr/bin/grub-installer
+  - package: user-setup-udeb
+    version: '1.107'
+    files:
+    - usr/bin/user-setup-ask
+    - usr/lib/user-setup/reserved-usernames
+  notes:
+  - 言語・国・基本キーボードは13.5 ISOのinitrd内のデータを使用。
+  - tzdata・localesは13.5 ISO内のdebから取得。その他のudebはISO収録版と同じ版。
+  - 日本語の表示名は収録テンプレートに従う。一部の候補は英語表示のまま。
+  - 言語一覧の既定localeがSUPPORTED-shortにない場合は本家のfallbackに従う（eo.UTF-8→eo）。元値はsource_default_localeに保存。
+  - 'tzsetupの候補のうち13.5のtzdataに存在しない旧名は除外: Canada/East-Saskatchewan, Mexico/Hermosillo, Mexico/Cancun'
+  - trixieのオンライン文書は更新される。mirror/suite=trixieは13.5時点のパッケージ固定を意味しない。
+groups:
+- id: localization
+  label: 言語・国／地域・キーボード
+- id: network
+  label: 有線ネットワーク
+- id: accounts
+  label: アカウント
+- id: clock
+  label: 時計
+- id: storage
+  label: ディスク・パーティション
+- id: apt
+  label: ミラー・APT
+- id: packages
+  label: パッケージ
+- id: bootloader
+  label: GRUB
+- id: finish
+  label: 終了動作
+- id: advanced
+  label: 終了直前コマンド
+- id: loading
+  label: Preseedの読み込み
+settings:
+- id: language
+  group: localization
+  label: インストール時の言語
+  help: 全78候補。minimum_display_level=4は本家のGTK等のレベル4環境、3はフレームバッファ等のレベル3以上の環境が必要。候補一覧は全件保持する。
+  answer:
+    kind: select
+    choices_from: languages
+    validation:
+    - rule: required
+  preseed:
+  - owner: d-i
+    key: debian-installer/language
+    type: string
+    value_from: language
+- id: country
+  group: localization
+  label: 国・地域
+  answer:
+    kind: select
+    choices_from: countries
+    navigation:
+      handler: country_hierarchy
+      language_from: language
+      regions_from: regions
+      shortlist_attribute: country_shortlist
+      country_regions_attribute: regions
+      other_label: その他
+    default_resolver:
+      name: language_default_country
+      inputs:
+        language: language
+    validation:
+    - rule: required
+  preseed:
+  - owner: d-i
+    key: debian-installer/country
+    type: string
+    value_from: country
+- id: locale
+  group: localization
+  label: システムのlocale
+  help: 一意なら質問せず決定。言語と国の組合せに候補がなければ、言語に対応するlocaleから選択。Cは非ローカライズ。
+  answer:
+    kind: select
+    choices_resolver:
+      name: locale_candidates
+      inputs:
+        language: language
+        country: country
+    default_resolver:
+      name: locale_default
+      inputs:
+        language: language
+        country: country
+    auto_if_single: true
+    validation:
+    - rule: required
+  preseed:
+  - owner: d-i
+    key: debian-installer/locale
+    type: string
+    value_from: locale
+- id: additional_locales
+  group: localization
+  label: 追加で生成するlocale
+  when:
+    not:
+      setting: locale
+      equals: C
+  answer:
+    kind: multiselect
+    choices_from: locales
+    default: []
+    choices_filter:
+      exclude_value_from: locale
+  preseed:
+  - owner: d-i
+    key: localechooser/supported-locales
+    type: multiselect
+    value_from: additional_locales
+    separator: ', '
+- id: keyboard_layout
+  group: localization
+  label: キーボード配列
+  answer:
+    kind: select
+    choices_from: keyboard_layouts
+    validation:
+    - rule: required
+  preseed:
+  - owner: d-i
+    key: keyboard-configuration/xkb-keymap
+    type: select
+    value_from: keyboard_layout
+- id: keyboard_toggle
+  group: localization
+  label: 配列を切り替えるキー
+  when:
+    setting: keyboard_layout
+    equals: true
+    attribute: requires_toggle
+  answer:
+    kind: select
+    choices_from: keyboard_toggles
+    default: Alt+Shift
+  preseed:
+  - owner: d-i
+    key: keyboard-configuration/toggle
+    type: select
+    value_from: keyboard_toggle
+- id: network_interface
+  group: network
+  label: インストール先の有線NIC（auto または名前）
+  help: 生成ツールを実行しているPCのNIC一覧は使わない。autoは本家のリンク検出による自動選択。
+  answer:
+    kind: input
+    default: auto
+    validation:
+    - rule: required
+    - rule: network_interface
+  preseed:
+  - owner: d-i
+    key: netcfg/choose_interface
+    type: select
+    value_from: network_interface
+- id: static_ipv4
+  group: network
+  label: '固定IPv4を設定しますか？（いいえ: DHCP）'
+  answer:
+    kind: boolean
+    default: false
+  preseed:
+  - owner: d-i
+    key: netcfg/disable_autoconfig
+    type: boolean
+    value_from: static_ipv4
+- id: ipv4_address
+  group: network
+  label: IPv4アドレス
+  when:
+    setting: static_ipv4
+    equals: true
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: ipv4_unicast
+  preseed:
+  - owner: d-i
+    key: netcfg/get_ipaddress
+    type: string
+    value_from: ipv4_address
+- id: ipv4_netmask
+  group: network
+  label: IPv4ネットマスク
+  when:
+    setting: static_ipv4
+    equals: true
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: ipv4_netmask
+  preseed:
+  - owner: d-i
+    key: netcfg/get_netmask
+    type: string
+    value_from: ipv4_netmask
+- id: ipv4_gateway
+  group: network
+  label: 'ゲートウェイ（空欄: なし）'
+  when:
+    setting: static_ipv4
+    equals: true
+  answer:
+    kind: input
+    validation:
+    - rule: optional_ipv4_unicast
+    default: ''
+  preseed:
+  - owner: d-i
+    key: netcfg/get_gateway
+    type: string
+    value_from: ipv4_gateway
+    transform: empty_to_none
+- id: ipv4_nameservers
+  group: network
+  label: DNSサーバーのIPv4（空白区切り・空欄可）
+  when:
+    setting: static_ipv4
+    equals: true
+  answer:
+    kind: input
+    validation:
+    - rule: ipv4_list
+    default: ''
+  preseed:
+  - owner: d-i
+    key: netcfg/get_nameservers
+    type: string
+    value_from: ipv4_nameservers
+    transform: normalize_space_list
+- id: confirm_static
+  group: network
+  label: confirm_static
+  when:
+    setting: static_ipv4
+    equals: true
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: netcfg/confirm_static
+    type: boolean
+    value_from: confirm_static
+- id: hostname
+  group: network
+  label: ホスト名
+  help: 選んだホスト名をDHCPや逆引きの結果より優先する。
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: hostname_label
+  preseed:
+  - owner: d-i
+    key: netcfg/get_hostname
+    type: string
+    value_from: hostname
+  - owner: d-i
+    key: netcfg/hostname
+    type: string
+    value_from: hostname
+- id: domain
+  group: network
+  label: ドメイン名（空欄可）
+  help: get_domainはDHCPが返すドメインを上書きしない。IPv6はOS側で無効化しない。
+  answer:
+    kind: input
+    default: ''
+    validation:
+    - rule: optional_dns_name
+  preseed:
+  - owner: d-i
+    key: netcfg/get_domain
+    type: string
+    value_from: domain
+- id: root_login
+  group: accounts
+  label: rootアカウントを有効にしますか？
+  help: 無効なら一般ユーザーを必ず作成し、本家の処理でsudoを利用可能にする。
+  answer:
+    kind: boolean
+  preseed:
+  - owner: d-i
+    key: passwd/root-login
+    type: boolean
+    value_from: root_login
+- id: make_user
+  group: accounts
+  label: 一般ユーザーを作成しますか？
+  when:
+    setting: root_login
+    equals: true
+  answer:
+    kind: boolean
+    default: true
+  preseed: []
+- id: create_user
+  group: accounts
+  label: 一般ユーザー作成の決定値
+  answer:
+    kind: none
+    value_resolver:
+      name: create_normal_user
+      inputs:
+        root_login: root_login
+        make_user: make_user
+  preseed:
+  - owner: d-i
+    key: passwd/make-user
+    type: boolean
+    value_from: create_user
+- id: root_password
+  group: accounts
+  label: rootパスワード
+  when:
+    setting: root_login
+    equals: true
+  answer:
+    kind: input
+    hidden: true
+    confirm: true
+    validation:
+    - rule: required
+  preseed:
+  - owner: d-i
+    key: passwd/root-password-crypted
+    type: password
+    value_from: root_password
+    transform: sha512_crypt
+- id: user_fullname
+  group: accounts
+  label: 一般ユーザーの氏名（空欄可）
+  when:
+    setting: create_user
+    equals: true
+  answer:
+    kind: input
+    default: ''
+    validation:
+    - rule: single_line
+  preseed:
+  - owner: d-i
+    key: passwd/user-fullname
+    type: string
+    value_from: user_fullname
+- id: username
+  group: accounts
+  label: 一般ユーザー名
+  when:
+    setting: create_user
+    equals: true
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: pattern
+      value: ^[a-z][-a-z0-9_]{0,31}$
+    - rule: not_in_catalog
+      catalog: reserved_usernames
+  preseed:
+  - owner: d-i
+    key: passwd/username
+    type: string
+    value_from: username
+- id: user_password
+  group: accounts
+  label: 一般ユーザーのパスワード
+  when:
+    setting: create_user
+    equals: true
+  answer:
+    kind: input
+    hidden: true
+    confirm: true
+    validation:
+    - rule: required
+  preseed:
+  - owner: d-i
+    key: passwd/user-password-crypted
+    type: password
+    value_from: user_password
+    transform: sha512_crypt
+- id: timezone
+  group: clock
+  label: タイムゾーン
+  answer:
+    kind: select
+    choices_from: timezones
+    navigation:
+      handler: timezone_by_country
+      country_from: country
+      all_label: すべての地域
+      include:
+      - UTC
+    default_resolver:
+      name: country_default_timezone
+      inputs:
+        country: country
+    validation:
+    - rule: required
+  preseed:
+  - owner: d-i
+    key: time/zone
+    type: string
+    value_from: timezone
+- id: hardware_clock_utc
+  group: clock
+  label: hardware_clock_utc
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: clock-setup/utc
+    type: boolean
+    value_from: hardware_clock_utc
+- id: ntp
+  group: clock
+  label: インストール中にNTPで時刻同期しますか？
+  answer:
+    kind: boolean
+    default: true
+  preseed:
+  - owner: d-i
+    key: clock-setup/ntp
+    type: boolean
+    value_from: ntp
+- id: ntp_server_mode
+  group: clock
+  label: NTPサーバー
+  when:
+    setting: ntp
+    equals: true
+  answer:
+    kind: select
+    default: installer
+    choices:
+    - label: 本家の既定サーバー
+      value: installer
+    - label: 指定する
+      value: custom
+  preseed: []
+- id: ntp_server
+  group: clock
+  label: NTPサーバーのホスト名またはIP
+  when:
+    all:
+    - setting: ntp
+      equals: true
+    - setting: ntp_server_mode
+      equals: custom
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: host_or_ip
+  preseed:
+  - owner: d-i
+    key: clock-setup/ntp-server
+    type: string
+    value_from: ntp_server
+- id: target_disk
+  group: storage
+  label: インストール対象ディスク
+  help: '例: /dev/sda, /dev/vda, /dev/nvme0n1。指定ディスクの既存領域を削除して全体を使用する。生成側では対象ディスクの存在・容量を判定できない。'
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: linux_whole_disk_path
+  preseed:
+  - owner: d-i
+    key: partman-auto/disk
+    type: string
+    value_from: target_disk
+- id: partition_method
+  group: storage
+  label: パーティション方式
+  answer:
+    kind: select
+    choices:
+    - label: 通常のパーティション
+      value: regular
+    - label: LVM
+      value: lvm
+  preseed:
+  - owner: d-i
+    key: partman-auto/method
+    type: string
+    value_from: partition_method
+- id: partition_recipe
+  group: storage
+  label: パーティションのレイアウト
+  help: ファイルシステム・swap容量・EFI/BIOS用の領域は13.5の組込みレシピに従う。容量不足はインストーラーでエラーとなる。
+  answer:
+    kind: select
+    choices_from: partition_recipes
+    default: atomic
+  preseed:
+  - owner: d-i
+    key: partman-auto/choose_recipe
+    type: select
+    value_from: partition_recipe
+- id: lvm_size_mode
+  group: storage
+  label: LVMに使用する容量
+  when:
+    setting: partition_method
+    equals: lvm
+  answer:
+    kind: select
+    default: max
+    choices:
+    - label: 全容量
+      value: max
+    - label: 容量を指定
+      value: size
+    - label: 割合を指定
+      value: percentage
+  preseed: []
+- id: lvm_size_amount
+  group: storage
+  label: 'LVM容量（例: 20 GB）'
+  when:
+    all:
+    - setting: partition_method
+      equals: lvm
+    - setting: lvm_size_mode
+      equals: size
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: partman_capacity
+  preseed: []
+- id: lvm_size_percentage
+  group: storage
+  label: LVMに使用する割合（1〜100）
+  when:
+    all:
+    - setting: partition_method
+      equals: lvm
+    - setting: lvm_size_mode
+      equals: percentage
+  answer:
+    kind: input
+    validation:
+    - rule: integer
+      minimum: 1
+      maximum: 100
+  preseed: []
+- id: lvm_guided_size
+  group: storage
+  label: LVM容量の決定値
+  when:
+    setting: partition_method
+    equals: lvm
+  answer:
+    kind: none
+    value_resolver:
+      name: lvm_guided_size
+      inputs:
+        mode: lvm_size_mode
+        amount: lvm_size_amount
+        percentage: lvm_size_percentage
+  preseed:
+  - owner: d-i
+    key: partman-auto-lvm/guided_size
+    type: string
+    value_from: lvm_guided_size
+- id: remove_old_lvm
+  group: storage
+  label: remove_old_lvm
+  help: 選択したディスク全体を使用するための自動確認。既存LVM/RAIDが複数ディスクにまたがるケースは初期対応外。
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: partman-lvm/device_remove_lvm
+    type: boolean
+    value_from: remove_old_lvm
+- id: remove_old_md
+  group: storage
+  label: remove_old_md
+  help: 選択したディスク全体を使用するための自動確認。既存LVM/RAIDが複数ディスクにまたがるケースは初期対応外。
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: partman-md/device_remove_md
+    type: boolean
+    value_from: remove_old_md
+- id: confirm_lvm
+  group: storage
+  label: confirm_lvm
+  help: 選択したディスク全体を使用するための自動確認。既存LVM/RAIDが複数ディスクにまたがるケースは初期対応外。
+  when:
+    setting: partition_method
+    equals: lvm
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: partman-lvm/confirm
+    type: boolean
+    value_from: confirm_lvm
+  - owner: d-i
+    key: partman-lvm/confirm_nooverwrite
+    type: boolean
+    value_from: confirm_lvm
+- id: write_partition_table
+  group: storage
+  label: write_partition_table
+  help: 選択したディスク全体を使用するための自動確認。既存LVM/RAIDが複数ディスクにまたがるケースは初期対応外。
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: partman-partitioning/confirm_write_new_label
+    type: boolean
+    value_from: write_partition_table
+- id: finish_partitioning
+  group: storage
+  label: finish_partitioning
+  help: 選択したディスク全体を使用するための自動確認。既存LVM/RAIDが複数ディスクにまたがるケースは初期対応外。
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: partman/confirm
+    type: boolean
+    value_from: finish_partitioning
+  - owner: d-i
+    key: partman/confirm_nooverwrite
+    type: boolean
+    value_from: finish_partitioning
+- id: partition_finish_action
+  group: storage
+  label: partition_finish_action
+  answer:
+    kind: none
+    value: finish
+  preseed:
+  - owner: d-i
+    key: partman/choose_partition
+    type: select
+    value_from: partition_finish_action
+- id: use_mirror
+  group: apt
+  label: ネットワークミラーを使用しますか？
+  help: 無効の場合、netinst ISOの収録パッケージだけでは選択したタスク・追加パッケージを満たせない場合がある。
+  answer:
+    kind: boolean
+    default: true
+  preseed:
+  - owner: d-i
+    key: apt-setup/use_mirror
+    type: boolean
+    value_from: use_mirror
+- id: mirror_country
+  group: apt
+  label: mirror_country
+  when:
+    setting: use_mirror
+    equals: true
+  answer:
+    kind: none
+    value: manual
+  preseed:
+  - owner: d-i
+    key: mirror/country
+    type: string
+    value_from: mirror_country
+- id: mirror_host
+  group: apt
+  label: ミラーのホスト名
+  when:
+    setting: use_mirror
+    equals: true
+  answer:
+    kind: input
+    default: deb.debian.org
+    validation:
+    - rule: required
+    - rule: dns_name
+  preseed:
+  - owner: d-i
+    key: mirror/http/hostname
+    type: string
+    value_from: mirror_host
+- id: mirror_directory
+  group: apt
+  label: ミラーのディレクトリ
+  when:
+    setting: use_mirror
+    equals: true
+  answer:
+    kind: input
+    default: /debian
+    validation:
+    - rule: required
+    - rule: absolute_url_path
+  preseed:
+  - owner: d-i
+    key: mirror/http/directory
+    type: string
+    value_from: mirror_directory
+- id: http_proxy
+  group: apt
+  label: 'HTTPプロキシURL（空欄: なし）'
+  when:
+    setting: use_mirror
+    equals: true
+  answer:
+    kind: input
+    default: ''
+    validation:
+    - rule: optional_http_proxy
+  preseed:
+  - owner: d-i
+    key: mirror/http/proxy
+    type: string
+    value_from: http_proxy
+- id: mirror_suite
+  group: apt
+  label: mirror_suite
+  when:
+    setting: use_mirror
+    equals: true
+  answer:
+    kind: none
+    value: trixie
+  preseed:
+  - owner: d-i
+    key: mirror/suite
+    type: string
+    value_from: mirror_suite
+- id: apt_services
+  group: apt
+  label: 有効にする更新サービス
+  when:
+    setting: use_mirror
+    equals: true
+  answer:
+    kind: multiselect
+    default:
+    - security
+    - updates
+    choices:
+    - label: セキュリティ更新
+      value: security
+    - label: 安定版の更新
+      value: updates
+  preseed:
+  - owner: d-i
+    key: apt-setup/services-select
+    type: multiselect
+    value_from: apt_services
+    separator: ', '
+- id: offline_apt_services
+  group: apt
+  label: offline_apt_services
+  when:
+    setting: use_mirror
+    equals: false
+  answer:
+    kind: none
+    value: ''
+  preseed:
+  - owner: d-i
+    key: apt-setup/services-select
+    type: multiselect
+    value_from: offline_apt_services
+- id: non_free_firmware
+  group: apt
+  label: non-free-firmwareを有効にしますか？
+  answer:
+    kind: boolean
+    default: true
+  preseed:
+  - owner: d-i
+    key: apt-setup/non-free-firmware
+    type: boolean
+    value_from: non_free_firmware
+- id: contrib
+  group: apt
+  label: contribを有効にしますか？
+  answer:
+    kind: boolean
+    default: false
+  preseed:
+  - owner: d-i
+    key: apt-setup/contrib
+    type: boolean
+    value_from: contrib
+- id: non_free
+  group: apt
+  label: non-freeを有効にしますか？
+  answer:
+    kind: boolean
+    default: false
+  preseed:
+  - owner: d-i
+    key: apt-setup/non-free
+    type: boolean
+    value_from: non_free
+- id: scan_additional_media
+  group: apt
+  label: scan_additional_media
+  answer:
+    kind: none
+    value: false
+  preseed:
+  - owner: d-i
+    key: apt-setup/cdrom/set-first
+    type: boolean
+    value_from: scan_additional_media
+- id: tasks
+  group: packages
+  label: インストールするタスク
+  answer:
+    kind: multiselect
+    default:
+    - standard
+    choices:
+    - label: 標準システムユーティリティ
+      value: standard
+    - label: SSHサーバー
+      value: ssh-server
+    - label: Webサーバー
+      value: web-server
+  preseed:
+  - owner: tasksel
+    key: tasksel/first
+    type: multiselect
+    value_from: tasks
+    separator: ', '
+- id: additional_packages
+  group: packages
+  label: 追加パッケージ（空白区切り・空欄可）
+  help: パッケージ名の構文を確認する。ミラー上での存在や依存関係はインストーラーで確認される。
+  answer:
+    kind: input
+    default: ''
+    validation:
+    - rule: debian_binary_package_list
+  preseed:
+  - owner: d-i
+    key: pkgsel/include
+    type: string
+    value_from: additional_packages
+    transform: normalize_space_list
+- id: install_recommends
+  group: packages
+  label: install_recommends
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: base-installer/install-recommends
+    type: boolean
+    value_from: install_recommends
+- id: package_upgrade
+  group: packages
+  label: インストール中のパッケージ更新
+  answer:
+    kind: select
+    default: none
+    choices:
+    - label: 更新しない
+      value: none
+    - label: safe-upgrade
+      value: safe-upgrade
+    - label: full-upgrade
+      value: full-upgrade
+  preseed:
+  - owner: d-i
+    key: pkgsel/upgrade
+    type: select
+    value_from: package_upgrade
+- id: popularity_contest
+  group: packages
+  label: popularity_contest
+  answer:
+    kind: none
+    value: false
+  preseed:
+  - owner: popularity-contest
+    key: popularity-contest/participate
+    type: boolean
+    value_from: popularity_contest
+- id: grub_only_debian
+  group: bootloader
+  label: grub_only_debian
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: grub-installer/only_debian
+    type: boolean
+    value_from: grub_only_debian
+- id: grub_with_other_os
+  group: bootloader
+  label: grub_with_other_os
+  help: OS用に指定したディスクへのGRUB導入を自動確認。他ディスクのOS検出はインストール先ディスクを変更する理由にしない。
+  answer:
+    kind: none
+    value: true
+  preseed:
+  - owner: d-i
+    key: grub-installer/with_other_os
+    type: boolean
+    value_from: grub_with_other_os
+- id: grub_target_disk
+  group: bootloader
+  label: GRUBの対象ディスク
+  help: BIOSでは指定ディスクへ導入。UEFIでは本家の処理でESPを使用し、bootdevによるディスク選択は行わない。EFIへの強制切替・removable設定は出力しない。
+  answer:
+    kind: none
+    value_from: target_disk
+  preseed:
+  - owner: d-i
+    key: grub-installer/bootdev
+    type: string
+    value_from: grub_target_disk
+- id: finish_action
+  group: finish
+  label: インストール完了後の動作
+  answer:
+    kind: select
+    default: reboot
+    choices:
+    - label: 再起動
+      value: reboot
+    - label: 停止
+      value: halt
+    - label: 電源OFF
+      value: poweroff
+  preseed:
+  - owner: d-i
+    key: debian-installer/exit/halt
+    type: boolean
+    value_resolver:
+      name: finish_flag
+      inputs:
+        action: finish_action
+    resolver_options:
+      flag: halt
+  - owner: d-i
+    key: debian-installer/exit/poweroff
+    type: boolean
+    value_resolver:
+      name: finish_flag
+      inputs:
+        action: finish_action
+    resolver_options:
+      flag: poweroff
+- id: eject_media
+  group: finish
+  label: インストールメディアを取り出しますか？
+  answer:
+    kind: boolean
+    default: true
+  preseed:
+  - owner: d-i
+    key: cdrom-detect/eject
+    type: boolean
+    value_from: eject_media
+- id: finish_message
+  group: finish
+  label: finish_message
+  answer:
+    kind: none
+    value: ''
+  preseed:
+  - owner: d-i
+    key: finish-install/reboot_in_progress
+    type: note
+    value_from: finish_message
+- id: late_command
+  group: advanced
+  label: '終了直前に実行するコマンド（空欄: なし）'
+  help: Debian Installer環境で実行。インストール先への操作にはin-targetを使用する。生成時には実行しない。
+  answer:
+    kind: text
+    default: ''
+    validation:
+    - rule: no_nul
+  preseed:
+  - owner: d-i
+    key: preseed/late_command
+    type: string
+    value_from: late_command
+    omit_if_empty: true
+    transform: shell_script_base64
+- id: preseed_loading
+  group: loading
+  label: Preseedの読み込み方法
+  answer:
+    kind: select
+    choices:
+    - label: ローカルファイル
+      value: file
+    - label: URL
+      value: url
+  preseed: []
+- id: preseed_file_path
+  group: loading
+  label: インストーラーから見たcfgの絶対パス
+  help: '例: /cdrom/preseed.cfg。配置先とマウント方法は別途用意する。/hd-mediaを万能のパスとして固定しない。'
+  when:
+    setting: preseed_loading
+    equals: file
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: boot_parameter_absolute_path
+  preseed: []
+- id: preseed_url
+  group: loading
+  label: cfgのURL
+  when:
+    setting: preseed_loading
+    equals: url
+  answer:
+    kind: input
+    validation:
+    - rule: required
+    - rule: preseed_http_url
+  preseed: []
 
+# 専用処理の契約。ここにある処理名をGo側で実装する。
+handlers:
+  country_hierarchy: >-
+    言語のcountry_shortlistがあればその国と「その他」を表示する。
+    その他はregionsから地域、countries.regionsにその地域を含む国を順に選ぶ。
+    shortlistがなければdefault_countryの地域の国一覧を最初に表示し、他地域へ戻れるようにする。
+    default_countryがないC等は地域選択から始める。最終回答は国コードのみ。
+  language_default_country: "選択言語のdefault_country。nullなら初期選択なし。"
+  locale_candidates: >-
+    language=CならCのみ。それ以外はlocalechooserのget_default_localeに従い、
+    選択言語のdefault_localeの接尾辞を保持したlanguage_COUNTRY候補、接尾辞なし候補を確認する。
+    言語コードは最初の_まで（zh_CN→zh、pt_BR→pt）。
+    適合する候補があれば一意に決定。なければその言語の対応localeを候補にする。
+    既定国と既定localeの言語部が異なる場合は本家と同じfallbackを使う。
+  locale_default: "適合するlocaleを優先。なければ言語のdefault_localeを初期候補にする。"
+  timezone_by_country: "国に対応する候補とUTCを表示。すべての地域からも選択可能。"
+  country_default_timezone: "countries.default_timezone。未定義の国ではUTCを初期候補にする。"
+  create_normal_user: "root_login=falseならtrue。trueならmake_userの回答値。"
+  lvm_guided_size: "mode=maxならmax、sizeならamount、percentageなら整数文字列に%を付ける。"
+  finish_flag: "haltフラグはaction=haltまたはpoweroffでtrue。poweroffフラグはaction=poweroffでtrue。"
+  sha512_crypt: "暗号学的な乱数saltでSHA-512 cryptを生成。確認入力を検証した後、出力直前に変換する。"
+  empty_to_none: "空文字列を文字列noneへ変換。それ以外はそのまま。"
+  normalize_space_list: "空白区切りの値をASCIIスペース1個で連結。重複は先頭を保持して除去。"
+  shell_script_base64: >-
+    入力のUTF-8バイト列（改行を含む）をBase64で1行に変換し、
+    printf '%s' '<BASE64>' | base64 -d | /bin/sh の形で出力する。
+    13.5のinitrdはbase64コマンドを含む。生成時にシェルは実行しない。
+    子の/bin/shで実行するため、終了コードはこのシェルの終了コードとなる。
+
+# 検証は設定ファイルの読込時・回答時・cfg出力前に行う。実装は未着手。
+validation_contract:
+  schema:
+    - "id・catalogのvalueの重複、参照先不存在、循環依存、未登録の処理名はエラー。"
+    - "noneと各preseed出力は値の指定方法を1つだけ持つ。"
+    - "選択値は候補内に限定し、条件が偽の回答は出力へ持ち越さない。"
+  values:
+    - "requiredは空入力不可。空を許す項目でもNUL・CR・改行は拒否（textはLFのみ許可）。"
+    - "ipv4_netmaskは連続したビットのドット区切りIPv4マスク。CIDR値をそのまま出力しない。"
+    - "IPv4のアドレス／マスク／ゲートウェイを組として確認する。DNSは空白区切りIPv4のみ。"
+    - "hostname_labelはASCIIホスト名1ラベル、dns_nameはDNSホスト名。任意URLとは区別する。"
+    - "linux_whole_disk_pathは/dev以下の単一の全ディスク指定。パーティション指定・空白入りを拒否。"
+    - "partman_capacityは正の数値と対応単位（例: 20 GB）。ディスク実容量は生成時に保証できない。"
+    - "debian_binary_package_listはDebianバイナリパッケージ名の空白区切り。空入力可。"
+    - "URL／パス／NIC名は起動引数への直列化も検証する。入力をそのままシェルに挿入しない。"
+  accounts: "root_login=falseの場合はcreate_user=trueが必須。パスワードは空にできない。"
+  secrets: "パスワード・プロキシ認証情報・URLの秘密値を回答一覧やログに表示しない。回答済みパスワードを雛形に保存しない。"
+
+output:
+  cfg:
+    suggested_filename: preseed.cfg
+    header: "#_preseed_V1"
+    format: "owner key type value"
+    notes:
+      - "ownerとtypeをキーごとに保持。string/select/passwordは文字列、booleanは真偽値、noteは空値。"
+      - "キーの重複は同時に有効な出力でのみエラー。排他的な条件なら同じキーを定義できる。"
+      - "単純な文字列にCR/LF/NULを混入させない。late_commandは専用変換で1行化する。"
+  boot_arguments:
+    base: ["auto=true", "priority=critical"]
+    file:
+      key: preseed/file
+      value_from: preseed_file_path
+    url:
+      key: preseed/url
+      value_from: preseed_url
+      network_before_fetch:
+        - {key: netcfg/choose_interface, value_from: network_interface}
+        - {key: netcfg/disable_autoconfig, value_from: static_ipv4}
+        - {key: netcfg/get_ipaddress, value_from: ipv4_address, when: {setting: static_ipv4, equals: true}}
+        - {key: netcfg/get_netmask, value_from: ipv4_netmask, when: {setting: static_ipv4, equals: true}}
+        - {key: netcfg/get_gateway, value_from: ipv4_gateway, transform: empty_to_none, when: {setting: static_ipv4, equals: true}}
+        - {key: netcfg/get_nameservers, value_from: ipv4_nameservers, transform: normalize_space_list, when: {setting: static_ipv4, equals: true}}
+        - {key: netcfg/confirm_static, value: true, when: {setting: static_ipv4, equals: true}}
+        - {key: netcfg/get_hostname, value_from: hostname}
+        - {key: netcfg/hostname, value_from: hostname}
+        - {key: netcfg/get_domain, value_from: domain}
+    notes:
+      - "URL取得より前のネットワーク設定はcfgのみでは間に合わないため起動引数にも反映。"
+      - "auto=trueで地域設定の質問をcfg読み込み後へ遅らせる。無関係なlocaleを起動引数に固定しない。"
+      - "スペースを含むDNS等の値、空値、URLはDebianの起動引数規則で引用する。"
+      - "長さとカーネル引数数の制限を検査。ブートローダーへの貼り付け方法は方式ごとに検証する。"
+      - "ISO再作成・ファイル配置・配布サーバー構築は行わず、cfgと起動引数の例を生成する。"
+
+verification:
+  yaml_syntax: checked
+  catalog_references: checked
+  catalog_source: "13.5 ISO内データ／収録版と同じudeb"
+  generator_implementation: pending
+  preseed_syntax: pending
+  vm_installation_bios: pending
+  vm_installation_uefi: pending
+
+# 実データの選択肢。labelは表示名、valueは出力／回答値。
+# 全候補を雛形に保持する。言語の表示レベル制限は本家の描画環境の制約。
+catalogs:
+  languages:
+    - {label: Albanian / Shqip, value: sq, minimum_display_level: 2, default_country: AL, default_locale: sq_AL.UTF-8, country_shortlist: [MK, AL]}
+    - {label: Amharic / አማርኛ, value: am, minimum_display_level: 4, default_country: ET, default_locale: am_ET, country_shortlist: []}
+    - {label: Arabic / عربي, value: ar, minimum_display_level: 3, default_country: EG, default_locale: ar_EG.UTF-8, country_shortlist: [SY, JO, AE, BH, DZ, SA, SD, IQ, KW, MA, IN, YE, TN, SS, OM, QA, LB, LY, EG]}
+    - {label: Asturian / Asturianu, value: ast, minimum_display_level: 2, default_country: ES, default_locale: ast_ES.UTF-8, country_shortlist: []}
+    - {label: Basque / Euskara, value: eu, minimum_display_level: 1, default_country: ES, default_locale: eu_ES.UTF-8, country_shortlist: [ES, FR]}
+    - {label: Belarusian / Беларуская, value: be, minimum_display_level: 2, default_country: BY, default_locale: be_BY.UTF-8, country_shortlist: []}
+    - {label: Bangla / বাংলা, value: bn, minimum_display_level: 4, default_country: BD, default_locale: bn_BD, country_shortlist: [BD, IN]}
+    - {label: Bosnian / Bosanski, value: bs, minimum_display_level: 2, default_country: BA, default_locale: bs_BA.UTF-8, country_shortlist: []}
+    - {label: Bulgarian / Български, value: bg, minimum_display_level: 2, default_country: BG, default_locale: bg_BG.UTF-8, country_shortlist: []}
+    - {label: Tibetan / བོད་ཡིག, value: bo, minimum_display_level: 4, default_country: IN, default_locale: bo_IN, country_shortlist: [CN, IN]}
+    - {label: C / No localization, value: C, minimum_display_level: 0, default_country: null, default_locale: C, country_shortlist: []}
+    - {label: Catalan / Català, value: ca, minimum_display_level: 1, default_country: ES, default_locale: ca_ES.UTF-8, country_shortlist: [AD, ES, FR, IT]}
+    - {label: Chinese (Simplified) / 中文(简体), value: zh_CN, minimum_display_level: 3, default_country: CN, default_locale: zh_CN.UTF-8, country_shortlist: [CN, TW, SG, HK]}
+    - {label: Chinese (Traditional) / 中文(繁體), value: zh_TW, minimum_display_level: 3, default_country: TW, default_locale: zh_TW.UTF-8, country_shortlist: [CN, SG, TW, HK]}
+    - {label: Croatian / Hrvatski, value: hr, minimum_display_level: 2, default_country: HR, default_locale: hr_HR.UTF-8, country_shortlist: []}
+    - {label: Czech / Čeština, value: cs, minimum_display_level: 2, default_country: CZ, default_locale: cs_CZ.UTF-8, country_shortlist: []}
+    - {label: Danish / Dansk, value: da, minimum_display_level: 1, default_country: DK, default_locale: da_DK.UTF-8, country_shortlist: []}
+    - {label: Dutch / Nederlands, value: nl, minimum_display_level: 1, default_country: NL, default_locale: nl_NL.UTF-8, country_shortlist: [AW, BE, NL]}
+    - {label: Dzongkha / རྫོང་ཁ།, value: dz, minimum_display_level: 4, default_country: BT, default_locale: dz_BT, country_shortlist: []}
+    - {label: English, value: en, minimum_display_level: 0, default_country: US, default_locale: en_US.UTF-8, country_shortlist: [AG, AU, BW, CA, HK, IN, IE, IL, NZ, NG, PH, SC, SG, ZA, GB, US, ZM, ZW]}
+    - {label: Esperanto, value: eo, minimum_display_level: 2, default_country: AQ, default_locale: eo, country_shortlist: [], source_default_locale: eo.UTF-8}
+    - {label: Estonian / Eesti, value: et, minimum_display_level: 2, default_country: EE, default_locale: et_EE.UTF-8, country_shortlist: []}
+    - {label: Finnish / Suomi, value: fi, minimum_display_level: 1, default_country: FI, default_locale: fi_FI.UTF-8, country_shortlist: []}
+    - {label: French / Français, value: fr, minimum_display_level: 1, default_country: FR, default_locale: fr_FR.UTF-8, country_shortlist: [BE, CA, FR, LU, CH]}
+    - {label: Galician / Galego, value: gl, minimum_display_level: 1, default_country: ES, default_locale: gl_ES.UTF-8, country_shortlist: []}
+    - {label: Georgian / ქართული, value: ka, minimum_display_level: 2, default_country: GE, default_locale: ka_GE.UTF-8, country_shortlist: []}
+    - {label: German / Deutsch, value: de, minimum_display_level: 1, default_country: DE, default_locale: de_DE.UTF-8, country_shortlist: [BE, DE, IT, LI, LU, CH, AT]}
+    - {label: Greek / Ελληνικά, value: el, minimum_display_level: 2, default_country: GR, default_locale: el_GR.UTF-8, country_shortlist: [GR, CY]}
+    - {label: Gujarati / ગુજરાતી, value: gu, minimum_display_level: 4, default_country: IN, default_locale: gu_IN, country_shortlist: []}
+    - {label: Hebrew / עברית, value: he, minimum_display_level: 3, default_country: IL, default_locale: he_IL.UTF-8, country_shortlist: []}
+    - {label: 'Hindi / हिन्दी ', value: hi, minimum_display_level: 4, default_country: IN, default_locale: hi_IN, country_shortlist: []}
+    - {label: Hungarian / Magyar, value: hu, minimum_display_level: 2, default_country: HU, default_locale: hu_HU.UTF-8, country_shortlist: []}
+    - {label: Icelandic / Íslenska, value: is, minimum_display_level: 1, default_country: IS, default_locale: is_IS.UTF-8, country_shortlist: []}
+    - {label: Indonesian / Bahasa Indonesia, value: id, minimum_display_level: 1, default_country: ID, default_locale: id_ID.UTF-8, country_shortlist: []}
+    - {label: Irish / Gaeilge, value: ga, minimum_display_level: 1, default_country: IE, default_locale: ga_IE.UTF-8, country_shortlist: []}
+    - {label: Italian / Italiano, value: it, minimum_display_level: 1, default_country: IT, default_locale: it_IT.UTF-8, country_shortlist: [IT, CH]}
+    - {label: Japanese / 日本語, value: ja, minimum_display_level: 3, default_country: JP, default_locale: ja_JP.UTF-8, country_shortlist: []}
+    - {label: Kabyle / Taqbaylit, value: kab, minimum_display_level: 4, default_country: DZ, default_locale: kab_DZ, country_shortlist: []}
+    - {label: Kazakh / Қазақ, value: kk, minimum_display_level: 2, default_country: KZ, default_locale: kk_KZ.UTF-8, country_shortlist: []}
+    - {label: Khmer / ខ្មែរ, value: km, minimum_display_level: 4, default_country: KH, default_locale: km_KH, country_shortlist: []}
+    - {label: Kannada / ಕನ್ನಡ, value: kn, minimum_display_level: 4, default_country: IN, default_locale: kn_IN, country_shortlist: []}
+    - {label: Korean / 한국어, value: ko, minimum_display_level: 3, default_country: KR, default_locale: ko_KR.UTF-8, country_shortlist: []}
+    - {label: Kurdish / Kurdî, value: ku, minimum_display_level: 2, default_country: TR, default_locale: ku_TR.UTF-8, country_shortlist: []}
+    - {label: Lao / ລາວ, value: lo, minimum_display_level: 3, default_country: LA, default_locale: lo_LA, country_shortlist: []}
+    - {label: Latvian / Latviski, value: lv, minimum_display_level: 2, default_country: LV, default_locale: lv_LV.UTF-8, country_shortlist: []}
+    - {label: Lithuanian / Lietuviškai, value: lt, minimum_display_level: 2, default_country: LT, default_locale: lt_LT.UTF-8, country_shortlist: []}
+    - {label: Malayalam / മലയാളം, value: ml, minimum_display_level: 4, default_country: IN, default_locale: ml_IN, country_shortlist: []}
+    - {label: Marathi / मराठी, value: mr, minimum_display_level: 4, default_country: IN, default_locale: mr_IN, country_shortlist: []}
+    - {label: Macedonian / Македонски, value: mk, minimum_display_level: 2, default_country: MK, default_locale: mk_MK.UTF-8, country_shortlist: []}
+    - {label: Burmese / မြန်မာစာ, value: my, minimum_display_level: 4, default_country: MM, default_locale: my_MM, country_shortlist: []}
+    - {label: 'Nepali / नेपाली ', value: ne, minimum_display_level: 4, default_country: NP, default_locale: ne_NP, country_shortlist: []}
+    - {label: Northern Sami / Sámegillii, value: se_NO, minimum_display_level: 1, default_country: 'NO', default_locale: se_NO, country_shortlist: []}
+    - {label: Norwegian Bokmaal / Norsk bokmål, value: nb_NO, minimum_display_level: 1, default_country: 'NO', default_locale: nb_NO.UTF-8, country_shortlist: []}
+    - {label: Norwegian Nynorsk / Norsk nynorsk, value: nn_NO, minimum_display_level: 1, default_country: 'NO', default_locale: nn_NO.UTF-8, country_shortlist: []}
+    - {label: Occitan, value: oc, minimum_display_level: 1, default_country: FR, default_locale: oc_FR.UTF-8, country_shortlist: []}
+    - {label: Persian / فارسی, value: fa, minimum_display_level: 3, default_country: IR, default_locale: fa_IR, country_shortlist: []}
+    - {label: Polish / Polski, value: pl, minimum_display_level: 2, default_country: PL, default_locale: pl_PL.UTF-8, country_shortlist: []}
+    - {label: Portuguese / Português, value: pt, minimum_display_level: 1, default_country: PT, default_locale: pt_PT.UTF-8, country_shortlist: [BR, PT]}
+    - {label: Portuguese (Brazil) / Português do Brasil, value: pt_BR, minimum_display_level: 1, default_country: BR, default_locale: pt_BR.UTF-8, country_shortlist: [BR, PT]}
+    - {label: Punjabi (Gurmukhi) / ਪੰਜਾਬੀ, value: pa, minimum_display_level: 4, default_country: IN, default_locale: pa_IN, country_shortlist: [PK, IN]}
+    - {label: Romanian / Română, value: ro, minimum_display_level: 2, default_country: RO, default_locale: ro_RO.UTF-8, country_shortlist: []}
+    - {label: Russian / Русский, value: ru, minimum_display_level: 2, default_country: RU, default_locale: ru_RU.UTF-8, country_shortlist: [RU, UA]}
+    - {label: Sinhala / සිංහල, value: si, minimum_display_level: 4, default_country: LK, default_locale: si_LK, country_shortlist: []}
+    - {label: Serbian (Cyrillic) / Српски, value: sr, minimum_display_level: 2, default_country: RS, default_locale: sr_RS, country_shortlist: [RS, ME]}
+    - {label: Slovak / Slovenčina, value: sk, minimum_display_level: 2, default_country: SK, default_locale: sk_SK.UTF-8, country_shortlist: []}
+    - {label: Slovenian / Slovenščina, value: sl, minimum_display_level: 2, default_country: SI, default_locale: sl_SI.UTF-8, country_shortlist: []}
+    - {label: Spanish / Español, value: es, minimum_display_level: 1, default_country: ES, default_locale: es_ES.UTF-8, country_shortlist: [AR, BO, CL, CO, CR, CU, EC, SV, ES, US, GT, HN, MX, NI, PA, PY, PE, PR, DO, UY, VE]}
+    - {label: Swedish / Svenska, value: sv, minimum_display_level: 1, default_country: SE, default_locale: sv_SE.UTF-8, country_shortlist: [FI, SE]}
+    - {label: Tagalog, value: tl, minimum_display_level: 1, default_country: PH, default_locale: tl_PH.UTF-8, country_shortlist: []}
+    - {label: Tamil / தமிழ், value: ta, minimum_display_level: 4, default_country: IN, default_locale: ta_IN, country_shortlist: [IN, LK]}
+    - {label: Telugu / తెలుగు, value: te, minimum_display_level: 4, default_country: IN, default_locale: te_IN, country_shortlist: []}
+    - {label: Tajik / Тоҷикӣ, value: tg, minimum_display_level: 2, default_country: TJ, default_locale: tg_TJ.UTF-8, country_shortlist: []}
+    - {label: Thai / ภาษาไทย, value: th, minimum_display_level: 3, default_country: TH, default_locale: th_TH.UTF-8, country_shortlist: []}
+    - {label: Turkish / Türkçe, value: tr, minimum_display_level: 2, default_country: TR, default_locale: tr_TR.UTF-8, country_shortlist: [CY, TR]}
+    - {label: Uyghur / ئۇيغۇرچە, value: ug, minimum_display_level: 3, default_country: CN, default_locale: ug_CN, country_shortlist: []}
+    - {label: Ukrainian / Українська, value: uk, minimum_display_level: 2, default_country: UA, default_locale: uk_UA.UTF-8, country_shortlist: []}
+    - {label: Vietnamese / Tiếng Việt, value: vi, minimum_display_level: 2, default_country: VN, default_locale: vi_VN, country_shortlist: []}
+    - {label: Welsh / Cymraeg, value: cy, minimum_display_level: 2, default_country: GB, default_locale: cy_GB.UTF-8, country_shortlist: []}
+  regions:
+    - {label: アフリカ, value: Africa}
+    - {label: 南極大陸, value: Antarctica}
+    - {label: アジア, value: Asia}
+    - {label: 大西洋, value: Atlantic_Ocean}
+    - {label: カリブ海, value: Caribbean}
+    - {label: 中央アメリカ, value: Central_America}
+    - {label: ヨーロッパ, value: Europe}
+    - {label: インド洋, value: Indian_Ocean}
+    - {label: 北アメリカ, value: North_America}
+    - {label: オセアニア, value: Oceania}
+    - {label: 南アメリカ, value: South_America}
+  countries:
+    - {label: アンドラ, value: AD, regions: [Europe], default_timezone: Europe/Andorra}
+    - {label: アラブ首長国連邦, value: AE, regions: [Asia], default_timezone: Asia/Dubai}
+    - {label: アフガニスタン, value: AF, regions: [Asia], default_timezone: Asia/Kabul}
+    - {label: アンティグア・バーブーダ, value: AG, regions: [Caribbean], default_timezone: America/Antigua}
+    - {label: アングイラ, value: AI, regions: [Caribbean], default_timezone: America/Anguilla}
+    - {label: アルバニア, value: AL, regions: [Europe], default_timezone: Europe/Tirane}
+    - {label: アルメニア, value: AM, regions: [Europe], default_timezone: Asia/Yerevan}
+    - {label: アンゴラ, value: AO, regions: [Africa], default_timezone: Africa/Luanda}
+    - {label: 南極大陸, value: AQ, regions: [Antarctica], default_timezone: Antarctica/McMurdo}
+    - {label: アルゼンチン, value: AR, regions: [South_America], default_timezone: America/Argentina/Buenos_Aires}
+    - {label: 米領サモア, value: AS, regions: [Oceania], default_timezone: Pacific/Pago_Pago}
+    - {label: オーストリア, value: AT, regions: [Europe], default_timezone: Europe/Vienna}
+    - {label: オーストラリア連邦, value: AU, regions: [Oceania], default_timezone: Australia/Canberra}
+    - {label: アルーバ, value: AW, regions: [Caribbean], default_timezone: America/Aruba}
+    - {label: オーランド諸島, value: AX, regions: [Europe], default_timezone: Europe/Mariehamn}
+    - {label: アゼルバイジャン, value: AZ, regions: [Europe], default_timezone: Asia/Baku}
+    - {label: ボスニア・ヘルツェゴビナ, value: BA, regions: [Europe], default_timezone: Europe/Sarajevo}
+    - {label: バルバドス, value: BB, regions: [Caribbean], default_timezone: America/Barbados}
+    - {label: バングラデシュ, value: BD, regions: [Asia], default_timezone: Asia/Dhaka}
+    - {label: ベルギー, value: BE, regions: [Europe], default_timezone: Europe/Brussels}
+    - {label: ブルキナファソ, value: BF, regions: [Africa], default_timezone: Africa/Ouagadougou}
+    - {label: ブルガリア, value: BG, regions: [Europe], default_timezone: Europe/Sofia}
+    - {label: バーレーン, value: BH, regions: [Asia], default_timezone: Asia/Bahrain}
+    - {label: ブルンジ, value: BI, regions: [Africa], default_timezone: Africa/Bujumbura}
+    - {label: ベナン, value: BJ, regions: [Africa], default_timezone: Africa/Porto-Novo}
+    - {label: サンバルテルミ, value: BL, regions: [Caribbean], default_timezone: America/St_Barthelemy}
+    - {label: バーミューダ, value: BM, regions: [Caribbean], default_timezone: Atlantic/Bermuda}
+    - {label: ブルネイ・ダルサラーム国, value: BN, regions: [Asia], default_timezone: Asia/Brunei}
+    - {label: ボリビア, value: BO, regions: [South_America], default_timezone: America/La_Paz}
+    - {label: ボネール、シントユースタティウス及びサバ, value: BQ, regions: [Caribbean], default_timezone: America/Kralendijk}
+    - {label: ブラジル, value: BR, regions: [South_America], default_timezone: America/Sao_Paulo}
+    - {label: バハマ, value: BS, regions: [Caribbean], default_timezone: America/Nassau}
+    - {label: ブータン, value: BT, regions: [Asia], default_timezone: Asia/Thimphu}
+    - {label: ブーベ島, value: BV, regions: [Atlantic_Ocean]}
+    - {label: ボツワナ, value: BW, regions: [Africa], default_timezone: Africa/Gaborone}
+    - {label: ベラルーシ, value: BY, regions: [Europe], default_timezone: Europe/Minsk}
+    - {label: ベリーズ, value: BZ, regions: [Central_America], default_timezone: America/Belize}
+    - {label: カナダ, value: CA, regions: [North_America], default_timezone: America/Toronto}
+    - {label: ココス (キーリング) 諸島, value: CC, regions: [Indian_Ocean], default_timezone: Indian/Cocos}
+    - {label: コンゴ民主共和国, value: CD, regions: [Africa], default_timezone: Africa/Kinshasa}
+    - {label: 中央アフリカ共和国, value: CF, regions: [Africa], default_timezone: Africa/Bangui}
+    - {label: コンゴ, value: CG, regions: [Africa], default_timezone: Africa/Brazzaville}
+    - {label: スイス, value: CH, regions: [Europe], default_timezone: Europe/Zurich}
+    - {label: コートジボワール, value: CI, regions: [Africa], default_timezone: Africa/Abidjan}
+    - {label: クック諸島, value: CK, regions: [Oceania], default_timezone: Pacific/Rarotonga}
+    - {label: チリ, value: CL, regions: [South_America], default_timezone: America/Santiago}
+    - {label: カメルーン, value: CM, regions: [Africa], default_timezone: Africa/Douala}
+    - {label: 中国, value: CN, regions: [Asia], default_timezone: Asia/Shanghai}
+    - {label: コロンビア, value: CO, regions: [South_America], default_timezone: America/Bogota}
+    - {label: コスタリカ, value: CR, regions: [Central_America], default_timezone: America/Costa_Rica}
+    - {label: キューバ, value: CU, regions: [Caribbean], default_timezone: America/Havana}
+    - {label: カーボヴェルデ, value: CV, regions: [Africa], default_timezone: Atlantic/Cape_Verde}
+    - {label: キュラソー, value: CW, regions: [Caribbean], default_timezone: America/Curacao}
+    - {label: クリスマス島, value: CX, regions: [Indian_Ocean], default_timezone: Indian/Christmas}
+    - {label: キプロス, value: CY, regions: [Europe], default_timezone: Asia/Nicosia}
+    - {label: Czechia, value: CZ, regions: [Europe], default_timezone: Europe/Prague}
+    - {label: ドイツ, value: DE, regions: [Europe], default_timezone: Europe/Berlin}
+    - {label: ジブチ, value: DJ, regions: [Africa], default_timezone: Africa/Djibouti}
+    - {label: デンマーク, value: DK, regions: [Europe], default_timezone: Europe/Copenhagen}
+    - {label: ドミニカ, value: DM, regions: [Caribbean], default_timezone: America/Dominica}
+    - {label: ドミニカ共和国, value: DO, regions: [Caribbean], default_timezone: America/Santo_Domingo}
+    - {label: アルジェリア, value: DZ, regions: [Africa], default_timezone: Africa/Algiers}
+    - {label: エクアドル, value: EC, regions: [South_America], default_timezone: America/Guayaquil}
+    - {label: エストニア, value: EE, regions: [Europe], default_timezone: Europe/Tallinn}
+    - {label: エジプト, value: EG, regions: [Africa], default_timezone: Africa/Cairo}
+    - {label: 西サハラ, value: EH, regions: [Africa], default_timezone: Africa/El_Aaiun}
+    - {label: エリトリア国, value: ER, regions: [Africa], default_timezone: Africa/Asmara}
+    - {label: スペイン, value: ES, regions: [Europe], default_timezone: Europe/Madrid}
+    - {label: エチオピア, value: ET, regions: [Africa], default_timezone: Africa/Addis_Ababa}
+    - {label: フィンランド, value: FI, regions: [Europe], default_timezone: Europe/Helsinki}
+    - {label: フィジー, value: FJ, regions: [Oceania], default_timezone: Pacific/Fiji}
+    - {label: フォークランド諸島 (マルビナス), value: FK, regions: [Atlantic_Ocean], default_timezone: Atlantic/Stanley}
+    - {label: ミクロネシア連邦, value: FM, regions: [Oceania], default_timezone: Pacific/Pohnpei}
+    - {label: フェロー諸島, value: FO, regions: [Europe], default_timezone: Atlantic/Faroe}
+    - {label: フランス, value: FR, regions: [Europe], default_timezone: Europe/Paris}
+    - {label: ガボン, value: GA, regions: [Africa], default_timezone: Africa/Libreville}
+    - {label: 英国, value: GB, regions: [Europe], default_timezone: Europe/London}
+    - {label: グレナダ, value: GD, regions: [Caribbean], default_timezone: America/Grenada}
+    - {label: グルジア, value: GE, regions: [Europe], default_timezone: Asia/Tbilisi}
+    - {label: 仏領ギアナ, value: GF, regions: [South_America], default_timezone: America/Cayenne}
+    - {label: ガーンジー, value: GG, regions: [Europe], default_timezone: Europe/Guernsey}
+    - {label: ガーナ, value: GH, regions: [Africa], default_timezone: Africa/Accra}
+    - {label: ジブラルタル, value: GI, regions: [Europe], default_timezone: Europe/Gibraltar}
+    - {label: グリーンランド, value: GL, regions: [Europe], default_timezone: America/Nuuk}
+    - {label: ガンビア, value: GM, regions: [Africa], default_timezone: Africa/Banjul}
+    - {label: ギニア, value: GN, regions: [Africa], default_timezone: Africa/Conakry}
+    - {label: グアドループ, value: GP, regions: [Caribbean], default_timezone: America/Guadeloupe}
+    - {label: 赤道ギニア, value: GQ, regions: [Africa], default_timezone: Africa/Malabo}
+    - {label: ギリシャ, value: GR, regions: [Europe], default_timezone: Europe/Athens}
+    - {label: サウスジョージア及びサウスサンドウィッチ諸島, value: GS, regions: [Atlantic_Ocean], default_timezone: Atlantic/South_Georgia}
+    - {label: グアテマラ, value: GT, regions: [Central_America], default_timezone: America/Guatemala}
+    - {label: グアム, value: GU, regions: [Oceania], default_timezone: Pacific/Guam}
+    - {label: ギニアビサウ, value: GW, regions: [Africa], default_timezone: Africa/Bissau}
+    - {label: ガイアナ, value: GY, regions: [South_America], default_timezone: America/Guyana}
+    - {label: 香港, value: HK, regions: [Asia], default_timezone: Asia/Hong_Kong}
+    - {label: ハード島及びマクドナルド諸島, value: HM, regions: [Indian_Ocean]}
+    - {label: ホンジュラス, value: HN, regions: [Central_America], default_timezone: America/Tegucigalpa}
+    - {label: クロアチア, value: HR, regions: [Europe], default_timezone: Europe/Zagreb}
+    - {label: ハイチ, value: HT, regions: [Caribbean], default_timezone: America/Port-au-Prince}
+    - {label: ハンガリー, value: HU, regions: [Europe], default_timezone: Europe/Budapest}
+    - {label: インドネシア, value: ID, regions: [Asia], default_timezone: Asia/Jakarta}
+    - {label: アイルランド, value: IE, regions: [Europe], default_timezone: Europe/Dublin}
+    - {label: イスラエル, value: IL, regions: [Asia], default_timezone: Asia/Jerusalem}
+    - {label: マン島, value: IM, regions: [Europe], default_timezone: Europe/Isle_of_Man}
+    - {label: インド, value: IN, regions: [Asia], default_timezone: Asia/Kolkata}
+    - {label: 英国インド洋領土, value: IO, regions: [Indian_Ocean], default_timezone: Indian/Chagos}
+    - {label: イラク, value: IQ, regions: [Asia], default_timezone: Asia/Baghdad}
+    - {label: Iran, value: IR, regions: [Asia], default_timezone: Asia/Tehran}
+    - {label: アイスランド, value: IS, regions: [Europe], default_timezone: Atlantic/Reykjavik}
+    - {label: イタリア, value: IT, regions: [Europe], default_timezone: Europe/Rome}
+    - {label: ジャージー, value: JE, regions: [Europe], default_timezone: Europe/Jersey}
+    - {label: ジャマイカ, value: JM, regions: [Caribbean], default_timezone: America/Jamaica}
+    - {label: ヨルダン, value: JO, regions: [Asia], default_timezone: Asia/Amman}
+    - {label: 日本, value: JP, regions: [Asia], default_timezone: Asia/Tokyo}
+    - {label: ケニア, value: KE, regions: [Africa], default_timezone: Africa/Nairobi}
+    - {label: キルギスタン, value: KG, regions: [Asia], default_timezone: Asia/Bishkek}
+    - {label: カンボジア, value: KH, regions: [Asia], default_timezone: Asia/Phnom_Penh}
+    - {label: キリバス, value: KI, regions: [Oceania], default_timezone: Pacific/Tarawa}
+    - {label: コモロ, value: KM, regions: [Indian_Ocean], default_timezone: Indian/Comoro}
+    - {label: セントクリストファー・ネーヴィス, value: KN, regions: [Caribbean], default_timezone: America/St_Kitts}
+    - {label: North Korea, value: KP, regions: [Asia], default_timezone: Asia/Pyongyang}
+    - {label: South Korea, value: KR, regions: [Asia], default_timezone: Asia/Seoul}
+    - {label: クウェート, value: KW, regions: [Asia], default_timezone: Asia/Kuwait}
+    - {label: ケイマン諸島, value: KY, regions: [Caribbean], default_timezone: America/Cayman}
+    - {label: カザフスタン, value: KZ, regions: [Asia], default_timezone: Asia/Almaty}
+    - {label: Laos, value: LA, regions: [Asia], default_timezone: Asia/Vientiane}
+    - {label: レバノン, value: LB, regions: [Asia], default_timezone: Asia/Beirut}
+    - {label: セントルシア, value: LC, regions: [Caribbean], default_timezone: America/St_Lucia}
+    - {label: リヒテンシュタイン, value: LI, regions: [Europe], default_timezone: Europe/Vaduz}
+    - {label: スリランカ, value: LK, regions: [Asia], default_timezone: Asia/Colombo}
+    - {label: リベリア, value: LR, regions: [Africa], default_timezone: Africa/Monrovia}
+    - {label: レソト, value: LS, regions: [Africa], default_timezone: Africa/Maseru}
+    - {label: リトアニア, value: LT, regions: [Europe], default_timezone: Europe/Vilnius}
+    - {label: ルクセンブルク, value: LU, regions: [Europe], default_timezone: Europe/Luxembourg}
+    - {label: ラトビア, value: LV, regions: [Europe], default_timezone: Europe/Riga}
+    - {label: リビア, value: LY, regions: [Africa], default_timezone: Africa/Tripoli}
+    - {label: モロッコ, value: MA, regions: [Africa], default_timezone: Africa/Casablanca}
+    - {label: モナコ, value: MC, regions: [Europe], default_timezone: Europe/Monaco}
+    - {label: モルドバ, value: MD, regions: [Europe], default_timezone: Europe/Chisinau}
+    - {label: モンテネグロ, value: ME, regions: [Europe], default_timezone: Europe/Podgorica}
+    - {label: サンマルタン (仏領), value: MF, regions: [Caribbean], default_timezone: America/Marigot}
+    - {label: マダガスカル, value: MG, regions: [Indian_Ocean], default_timezone: Indian/Antananarivo}
+    - {label: マーシャル諸島, value: MH, regions: [Oceania], default_timezone: Pacific/Majuro}
+    - {label: North Macedonia, value: MK, regions: [Europe], default_timezone: Europe/Skopje}
+    - {label: マリ, value: ML, regions: [Africa], default_timezone: Africa/Bamako}
+    - {label: ミャンマー, value: MM, regions: [Asia], default_timezone: Asia/Yangon}
+    - {label: モンゴル国, value: MN, regions: [Asia], default_timezone: Asia/Ulaanbaatar}
+    - {label: マカオ, value: MO, regions: [Asia], default_timezone: Asia/Macau}
+    - {label: 北マリアナ諸島, value: MP, regions: [Oceania], default_timezone: Pacific/Saipan}
+    - {label: マルティニーク, value: MQ, regions: [Caribbean], default_timezone: America/Martinique}
+    - {label: モーリタニア, value: MR, regions: [Africa], default_timezone: Africa/Nouakchott}
+    - {label: モントセラト, value: MS, regions: [Caribbean], default_timezone: America/Montserrat}
+    - {label: マルタ, value: MT, regions: [Europe], default_timezone: Europe/Malta}
+    - {label: モーリシャス, value: MU, regions: [Indian_Ocean], default_timezone: Indian/Mauritius}
+    - {label: モルディブ, value: MV, regions: [Indian_Ocean], default_timezone: Indian/Maldives}
+    - {label: マラウイ, value: MW, regions: [Africa], default_timezone: Africa/Blantyre}
+    - {label: メキシコ, value: MX, regions: [North_America], default_timezone: America/Mexico_City}
+    - {label: マレーシア, value: MY, regions: [Asia], default_timezone: Asia/Kuala_Lumpur}
+    - {label: モザンビーク, value: MZ, regions: [Africa], default_timezone: Africa/Maputo}
+    - {label: ナミビア, value: NA, regions: [Africa], default_timezone: Africa/Windhoek}
+    - {label: ニューカレドニア, value: NC, regions: [Oceania], default_timezone: Pacific/Noumea}
+    - {label: ニジェール, value: NE, regions: [Africa], default_timezone: Africa/Niamey}
+    - {label: ノーフォーク島, value: NF, regions: [Oceania], default_timezone: Pacific/Norfolk}
+    - {label: ナイジェリア, value: NG, regions: [Africa], default_timezone: Africa/Lagos}
+    - {label: ニカラグア, value: NI, regions: [Central_America], default_timezone: America/Managua}
+    - {label: オランダ, value: NL, regions: [Europe], default_timezone: Europe/Amsterdam}
+    - {label: ノルウェー, value: 'NO', regions: [Europe], default_timezone: Europe/Oslo}
+    - {label: ネパール, value: NP, regions: [Asia], default_timezone: Asia/Kathmandu}
+    - {label: ナウル, value: NR, regions: [Oceania], default_timezone: Pacific/Nauru}
+    - {label: ニウエ, value: NU, regions: [Oceania], default_timezone: Pacific/Niue}
+    - {label: ニュージーランド, value: NZ, regions: [Oceania], default_timezone: Pacific/Auckland}
+    - {label: オマーン, value: OM, regions: [Asia], default_timezone: Asia/Muscat}
+    - {label: パナマ, value: PA, regions: [Central_America], default_timezone: America/Panama}
+    - {label: ペルー, value: PE, regions: [South_America], default_timezone: America/Lima}
+    - {label: 仏領ポリネシア, value: PF, regions: [Oceania], default_timezone: Pacific/Tahiti}
+    - {label: パプアニューギニア, value: PG, regions: [Oceania], default_timezone: Pacific/Port_Moresby}
+    - {label: フィリピン, value: PH, regions: [Asia], default_timezone: Asia/Manila}
+    - {label: パキスタン, value: PK, regions: [Asia], default_timezone: Asia/Karachi}
+    - {label: ポーランド, value: PL, regions: [Europe], default_timezone: Europe/Warsaw}
+    - {label: サンピエール及びミクロン, value: PM, regions: [North_America], default_timezone: America/Miquelon}
+    - {label: ピトケアン, value: PN, regions: [Oceania], default_timezone: Pacific/Pitcairn}
+    - {label: プエルトリコ, value: PR, regions: [Caribbean], default_timezone: America/Puerto_Rico}
+    - {label: パレスチナ, value: PS, regions: [Asia], default_timezone: Asia/Gaza}
+    - {label: ポルトガル, value: PT, regions: [Europe], default_timezone: Europe/Lisbon}
+    - {label: パラオ, value: PW, regions: [Oceania], default_timezone: Pacific/Palau}
+    - {label: パラグアイ, value: PY, regions: [South_America], default_timezone: America/Asuncion}
+    - {label: カタール, value: QA, regions: [Asia], default_timezone: Asia/Qatar}
+    - {label: レユニオン, value: RE, regions: [Indian_Ocean], default_timezone: Indian/Reunion}
+    - {label: ルーマニア, value: RO, regions: [Europe], default_timezone: Europe/Bucharest}
+    - {label: セルビア, value: RS, regions: [Europe], default_timezone: Europe/Belgrade}
+    - {label: ロシア連邦, value: RU, regions: [Europe], default_timezone: Europe/Moscow}
+    - {label: ルワンダ, value: RW, regions: [Africa], default_timezone: Africa/Kigali}
+    - {label: サウジアラビア, value: SA, regions: [Asia], default_timezone: Asia/Riyadh}
+    - {label: ソロモン諸島, value: SB, regions: [Oceania], default_timezone: Pacific/Guadalcanal}
+    - {label: セーシェル, value: SC, regions: [Indian_Ocean], default_timezone: Indian/Mahe}
+    - {label: スーダン, value: SD, regions: [Africa], default_timezone: Africa/Khartoum}
+    - {label: スウェーデン, value: SE, regions: [Europe], default_timezone: Europe/Stockholm}
+    - {label: シンガポール, value: SG, regions: [Asia], default_timezone: Asia/Singapore}
+    - {label: セントヘレナ、アセンション及びトリスタン・ダ・クーニャ, value: SH, regions: [Atlantic_Ocean], default_timezone: Atlantic/St_Helena}
+    - {label: スロベニア, value: SI, regions: [Europe], default_timezone: Europe/Ljubljana}
+    - {label: スヴァールバル及びヤンマイエン, value: SJ, regions: [Europe], default_timezone: Europe/Oslo}
+    - {label: スロバキア, value: SK, regions: [Europe], default_timezone: Europe/Bratislava}
+    - {label: シエラレオネ, value: SL, regions: [Africa], default_timezone: Africa/Freetown}
+    - {label: サンマリノ, value: SM, regions: [Europe], default_timezone: Europe/San_Marino}
+    - {label: セネガル, value: SN, regions: [Africa], default_timezone: Africa/Dakar}
+    - {label: ソマリア, value: SO, regions: [Africa], default_timezone: Africa/Mogadishu}
+    - {label: スリナム, value: SR, regions: [South_America], default_timezone: America/Paramaribo}
+    - {label: 南スーダン, value: SS, regions: [Africa], default_timezone: Africa/Juba}
+    - {label: サントメ・プリンシペ, value: ST, regions: [Africa], default_timezone: Africa/Sao_Tome}
+    - {label: エルサルバドル, value: SV, regions: [Central_America], default_timezone: America/El_Salvador}
+    - {label: サンマルタン (オランダ領), value: SX, regions: [Caribbean], default_timezone: America/Lower_Princes}
+    - {label: Syria, value: SY, regions: [Asia], default_timezone: Asia/Damascus}
+    - {label: Eswatini, value: SZ, regions: [Africa], default_timezone: Africa/Mbabane}
+    - {label: タークス及びカイコス諸島, value: TC, regions: [Caribbean], default_timezone: America/Grand_Turk}
+    - {label: チャド, value: TD, regions: [Africa], default_timezone: Africa/Ndjamena}
+    - {label: フランス南方領土, value: TF, regions: [Indian_Ocean], default_timezone: Indian/Kerguelen}
+    - {label: トーゴ, value: TG, regions: [Africa], default_timezone: Africa/Lome}
+    - {label: タイ, value: TH, regions: [Asia], default_timezone: Asia/Bangkok}
+    - {label: タジキスタン, value: TJ, regions: [Asia], default_timezone: Asia/Dushanbe}
+    - {label: トケラウ, value: TK, regions: [Oceania], default_timezone: Pacific/Fakaofo}
+    - {label: 東ティモール, value: TL, regions: [Asia], default_timezone: Asia/Dili}
+    - {label: トルクメニスタン, value: TM, regions: [Asia], default_timezone: Asia/Ashgabat}
+    - {label: チュニジア, value: TN, regions: [Africa], default_timezone: Africa/Tunis}
+    - {label: トンガ, value: TO, regions: [Oceania], default_timezone: Pacific/Tongatapu}
+    - {label: Türkiye, value: TR, regions: [Asia], default_timezone: Europe/Istanbul}
+    - {label: トリニダード・トバゴ, value: TT, regions: [Caribbean], default_timezone: America/Port_of_Spain}
+    - {label: ツバル, value: TV, regions: [Oceania], default_timezone: Pacific/Funafuti}
+    - {label: 台湾, value: TW, regions: [Asia], default_timezone: Asia/Taipei}
+    - {label: タンザニア, value: TZ, regions: [Africa], default_timezone: Africa/Dar_es_Salaam}
+    - {label: ウクライナ, value: UA, regions: [Europe], default_timezone: Europe/Kyiv}
+    - {label: ウガンダ, value: UG, regions: [Africa], default_timezone: Africa/Kampala}
+    - {label: アメリカ合衆国外諸島, value: UM, regions: [Oceania], default_timezone: Pacific/Midway}
+    - {label: 米国, value: US, regions: [North_America], default_timezone: America/New_York}
+    - {label: ウルグアイ, value: UY, regions: [South_America], default_timezone: America/Montevideo}
+    - {label: ウズベキスタン, value: UZ, regions: [Asia], default_timezone: Asia/Samarkand}
+    - {label: 聖庁 (バチカン市国), value: VA, regions: [Europe], default_timezone: Europe/Vatican}
+    - {label: セントビンセント及びグレナディーン諸島, value: VC, regions: [Caribbean], default_timezone: America/St_Vincent}
+    - {label: ベネズエラ, value: VE, regions: [South_America], default_timezone: America/Caracas}
+    - {label: 英領ヴァージン諸島, value: VG, regions: [Caribbean], default_timezone: America/Tortola}
+    - {label: 米領ヴァージン諸島, value: VI, regions: [Caribbean], default_timezone: America/St_Thomas}
+    - {label: ベトナム, value: VN, regions: [Asia], default_timezone: Asia/Ho_Chi_Minh}
+    - {label: バヌアツ, value: VU, regions: [Oceania], default_timezone: Pacific/Efate}
+    - {label: ワリー及びフテュナ, value: WF, regions: [Oceania], default_timezone: Pacific/Wallis}
+    - {label: サモア, value: WS, regions: [Oceania], default_timezone: Pacific/Apia}
+    - {label: イエメン, value: YE, regions: [Asia], default_timezone: Asia/Aden}
+    - {label: マヨット, value: YT, regions: [Indian_Ocean], default_timezone: Indian/Mayotte}
+    - {label: 南アフリカ, value: ZA, regions: [Africa], default_timezone: Africa/Johannesburg}
+    - {label: ザンビア, value: ZM, regions: [Africa], default_timezone: Africa/Lusaka}
+    - {label: ジンバブエ, value: ZW, regions: [Africa], default_timezone: Africa/Harare}
+  locales:
+    - {label: aa_DJ.UTF-8, value: aa_DJ.UTF-8, language: aa, country: DJ, encoding: UTF-8}
+    - {label: aa_DJ, value: aa_DJ, language: aa, country: DJ, encoding: ISO-8859-1}
+    - {label: aa_ER, value: aa_ER, language: aa, country: ER, encoding: UTF-8}
+    - {label: aa_ET, value: aa_ET, language: aa, country: ET, encoding: UTF-8}
+    - {label: af_ZA.UTF-8, value: af_ZA.UTF-8, language: af, country: ZA, encoding: UTF-8}
+    - {label: af_ZA, value: af_ZA, language: af, country: ZA, encoding: ISO-8859-1}
+    - {label: agr_PE, value: agr_PE, language: agr, country: PE, encoding: UTF-8}
+    - {label: ak_GH, value: ak_GH, language: ak, country: GH, encoding: UTF-8}
+    - {label: am_ET, value: am_ET, language: am, country: ET, encoding: UTF-8}
+    - {label: an_ES.UTF-8, value: an_ES.UTF-8, language: an, country: ES, encoding: UTF-8}
+    - {label: an_ES, value: an_ES, language: an, country: ES, encoding: ISO-8859-15}
+    - {label: anp_IN, value: anp_IN, language: anp, country: IN, encoding: UTF-8}
+    - {label: ar_AE.UTF-8, value: ar_AE.UTF-8, language: ar, country: AE, encoding: UTF-8}
+    - {label: ar_AE, value: ar_AE, language: ar, country: AE, encoding: ISO-8859-6}
+    - {label: ar_BH.UTF-8, value: ar_BH.UTF-8, language: ar, country: BH, encoding: UTF-8}
+    - {label: ar_BH, value: ar_BH, language: ar, country: BH, encoding: ISO-8859-6}
+    - {label: ar_DZ.UTF-8, value: ar_DZ.UTF-8, language: ar, country: DZ, encoding: UTF-8}
+    - {label: ar_DZ, value: ar_DZ, language: ar, country: DZ, encoding: ISO-8859-6}
+    - {label: ar_EG.UTF-8, value: ar_EG.UTF-8, language: ar, country: EG, encoding: UTF-8}
+    - {label: ar_EG, value: ar_EG, language: ar, country: EG, encoding: ISO-8859-6}
+    - {label: ar_IN, value: ar_IN, language: ar, country: IN, encoding: UTF-8}
+    - {label: ar_IQ.UTF-8, value: ar_IQ.UTF-8, language: ar, country: IQ, encoding: UTF-8}
+    - {label: ar_IQ, value: ar_IQ, language: ar, country: IQ, encoding: ISO-8859-6}
+    - {label: ar_JO.UTF-8, value: ar_JO.UTF-8, language: ar, country: JO, encoding: UTF-8}
+    - {label: ar_JO, value: ar_JO, language: ar, country: JO, encoding: ISO-8859-6}
+    - {label: ar_KW.UTF-8, value: ar_KW.UTF-8, language: ar, country: KW, encoding: UTF-8}
+    - {label: ar_KW, value: ar_KW, language: ar, country: KW, encoding: ISO-8859-6}
+    - {label: ar_LB.UTF-8, value: ar_LB.UTF-8, language: ar, country: LB, encoding: UTF-8}
+    - {label: ar_LB, value: ar_LB, language: ar, country: LB, encoding: ISO-8859-6}
+    - {label: ar_LY.UTF-8, value: ar_LY.UTF-8, language: ar, country: LY, encoding: UTF-8}
+    - {label: ar_LY, value: ar_LY, language: ar, country: LY, encoding: ISO-8859-6}
+    - {label: ar_MA.UTF-8, value: ar_MA.UTF-8, language: ar, country: MA, encoding: UTF-8}
+    - {label: ar_MA, value: ar_MA, language: ar, country: MA, encoding: ISO-8859-6}
+    - {label: ar_OM.UTF-8, value: ar_OM.UTF-8, language: ar, country: OM, encoding: UTF-8}
+    - {label: ar_OM, value: ar_OM, language: ar, country: OM, encoding: ISO-8859-6}
+    - {label: ar_QA.UTF-8, value: ar_QA.UTF-8, language: ar, country: QA, encoding: UTF-8}
+    - {label: ar_QA, value: ar_QA, language: ar, country: QA, encoding: ISO-8859-6}
+    - {label: ar_SA.UTF-8, value: ar_SA.UTF-8, language: ar, country: SA, encoding: UTF-8}
+    - {label: ar_SA, value: ar_SA, language: ar, country: SA, encoding: ISO-8859-6}
+    - {label: ar_SD.UTF-8, value: ar_SD.UTF-8, language: ar, country: SD, encoding: UTF-8}
+    - {label: ar_SD, value: ar_SD, language: ar, country: SD, encoding: ISO-8859-6}
+    - {label: ar_SS, value: ar_SS, language: ar, country: SS, encoding: UTF-8}
+    - {label: ar_SY.UTF-8, value: ar_SY.UTF-8, language: ar, country: SY, encoding: UTF-8}
+    - {label: ar_SY, value: ar_SY, language: ar, country: SY, encoding: ISO-8859-6}
+    - {label: ar_TN.UTF-8, value: ar_TN.UTF-8, language: ar, country: TN, encoding: UTF-8}
+    - {label: ar_TN, value: ar_TN, language: ar, country: TN, encoding: ISO-8859-6}
+    - {label: ar_YE.UTF-8, value: ar_YE.UTF-8, language: ar, country: YE, encoding: UTF-8}
+    - {label: ar_YE, value: ar_YE, language: ar, country: YE, encoding: ISO-8859-6}
+    - {label: ayc_PE, value: ayc_PE, language: ayc, country: PE, encoding: UTF-8}
+    - {label: az_AZ, value: az_AZ, language: az, country: AZ, encoding: UTF-8}
+    - {label: az_IR, value: az_IR, language: az, country: IR, encoding: UTF-8}
+    - {label: as_IN, value: as_IN, language: as, country: IN, encoding: UTF-8}
+    - {label: ast_ES.UTF-8, value: ast_ES.UTF-8, language: ast, country: ES, encoding: UTF-8}
+    - {label: ast_ES, value: ast_ES, language: ast, country: ES, encoding: ISO-8859-15}
+    - {label: be_BY.UTF-8, value: be_BY.UTF-8, language: be, country: BY, encoding: UTF-8}
+    - {label: be_BY, value: be_BY, language: be, country: BY, encoding: CP1251}
+    - {label: be_BY@latin, value: be_BY@latin, language: be, country: BY, encoding: UTF-8}
+    - {label: bem_ZM, value: bem_ZM, language: bem, country: ZM, encoding: UTF-8}
+    - {label: ber_DZ, value: ber_DZ, language: ber, country: DZ, encoding: UTF-8}
+    - {label: ber_MA, value: ber_MA, language: ber, country: MA, encoding: UTF-8}
+    - {label: bg_BG.UTF-8, value: bg_BG.UTF-8, language: bg, country: BG, encoding: UTF-8}
+    - {label: bg_BG, value: bg_BG, language: bg, country: BG, encoding: CP1251}
+    - {label: bhb_IN.UTF-8, value: bhb_IN.UTF-8, language: bhb, country: IN, encoding: UTF-8}
+    - {label: bho_IN, value: bho_IN, language: bho, country: IN, encoding: UTF-8}
+    - {label: bho_NP, value: bho_NP, language: bho, country: NP, encoding: UTF-8}
+    - {label: bi_VU, value: bi_VU, language: bi, country: VU, encoding: UTF-8}
+    - {label: bn_BD, value: bn_BD, language: bn, country: BD, encoding: UTF-8}
+    - {label: bn_IN, value: bn_IN, language: bn, country: IN, encoding: UTF-8}
+    - {label: bo_CN, value: bo_CN, language: bo, country: CN, encoding: UTF-8}
+    - {label: bo_IN, value: bo_IN, language: bo, country: IN, encoding: UTF-8}
+    - {label: br_FR.UTF-8, value: br_FR.UTF-8, language: br, country: FR, encoding: UTF-8}
+    - {label: br_FR, value: br_FR, language: br, country: FR, encoding: ISO-8859-1}
+    - {label: br_FR@euro, value: br_FR@euro, language: br, country: FR, encoding: ISO-8859-15}
+    - {label: brx_IN, value: brx_IN, language: brx, country: IN, encoding: UTF-8}
+    - {label: bs_BA.UTF-8, value: bs_BA.UTF-8, language: bs, country: BA, encoding: UTF-8}
+    - {label: bs_BA, value: bs_BA, language: bs, country: BA, encoding: ISO-8859-2}
+    - {label: byn_ER, value: byn_ER, language: byn, country: ER, encoding: UTF-8}
+    - {label: C.UTF-8, value: C.UTF-8, language: C, country: null, encoding: UTF-8}
+    - {label: ca_AD.UTF-8, value: ca_AD.UTF-8, language: ca, country: AD, encoding: UTF-8}
+    - {label: ca_AD, value: ca_AD, language: ca, country: AD, encoding: ISO-8859-15}
+    - {label: ca_ES.UTF-8, value: ca_ES.UTF-8, language: ca, country: ES, encoding: UTF-8}
+    - {label: ca_ES, value: ca_ES, language: ca, country: ES, encoding: ISO-8859-1}
+    - {label: ca_ES@euro, value: ca_ES@euro, language: ca, country: ES, encoding: ISO-8859-15}
+    - {label: ca_ES@valencia, value: ca_ES@valencia, language: ca, country: ES, encoding: UTF-8}
+    - {label: ca_FR.UTF-8, value: ca_FR.UTF-8, language: ca, country: FR, encoding: UTF-8}
+    - {label: ca_FR, value: ca_FR, language: ca, country: FR, encoding: ISO-8859-15}
+    - {label: ca_IT.UTF-8, value: ca_IT.UTF-8, language: ca, country: IT, encoding: UTF-8}
+    - {label: ca_IT, value: ca_IT, language: ca, country: IT, encoding: ISO-8859-15}
+    - {label: ce_RU, value: ce_RU, language: ce, country: RU, encoding: UTF-8}
+    - {label: chr_US, value: chr_US, language: chr, country: US, encoding: UTF-8}
+    - {label: ckb_IQ, value: ckb_IQ, language: ckb, country: IQ, encoding: UTF-8}
+    - {label: cmn_TW, value: cmn_TW, language: cmn, country: TW, encoding: UTF-8}
+    - {label: crh_RU, value: crh_RU, language: crh, country: RU, encoding: UTF-8}
+    - {label: crh_UA, value: crh_UA, language: crh, country: UA, encoding: UTF-8}
+    - {label: cs_CZ.UTF-8, value: cs_CZ.UTF-8, language: cs, country: CZ, encoding: UTF-8}
+    - {label: cs_CZ, value: cs_CZ, language: cs, country: CZ, encoding: ISO-8859-2}
+    - {label: csb_PL, value: csb_PL, language: csb, country: PL, encoding: UTF-8}
+    - {label: cv_RU, value: cv_RU, language: cv, country: RU, encoding: UTF-8}
+    - {label: cy_GB.UTF-8, value: cy_GB.UTF-8, language: cy, country: GB, encoding: UTF-8}
+    - {label: cy_GB, value: cy_GB, language: cy, country: GB, encoding: ISO-8859-14}
+    - {label: da_DK.UTF-8, value: da_DK.UTF-8, language: da, country: DK, encoding: UTF-8}
+    - {label: da_DK, value: da_DK, language: da, country: DK, encoding: ISO-8859-1}
+    - {label: de_AT.UTF-8, value: de_AT.UTF-8, language: de, country: AT, encoding: UTF-8}
+    - {label: de_AT, value: de_AT, language: de, country: AT, encoding: ISO-8859-1}
+    - {label: de_AT@euro, value: de_AT@euro, language: de, country: AT, encoding: ISO-8859-15}
+    - {label: de_BE.UTF-8, value: de_BE.UTF-8, language: de, country: BE, encoding: UTF-8}
+    - {label: de_BE, value: de_BE, language: de, country: BE, encoding: ISO-8859-1}
+    - {label: de_BE@euro, value: de_BE@euro, language: de, country: BE, encoding: ISO-8859-15}
+    - {label: de_CH.UTF-8, value: de_CH.UTF-8, language: de, country: CH, encoding: UTF-8}
+    - {label: de_CH, value: de_CH, language: de, country: CH, encoding: ISO-8859-1}
+    - {label: de_DE.UTF-8, value: de_DE.UTF-8, language: de, country: DE, encoding: UTF-8}
+    - {label: de_DE, value: de_DE, language: de, country: DE, encoding: ISO-8859-1}
+    - {label: de_DE@euro, value: de_DE@euro, language: de, country: DE, encoding: ISO-8859-15}
+    - {label: de_IT.UTF-8, value: de_IT.UTF-8, language: de, country: IT, encoding: UTF-8}
+    - {label: de_IT, value: de_IT, language: de, country: IT, encoding: ISO-8859-1}
+    - {label: de_LI.UTF-8, value: de_LI.UTF-8, language: de, country: LI, encoding: UTF-8}
+    - {label: de_LU.UTF-8, value: de_LU.UTF-8, language: de, country: LU, encoding: UTF-8}
+    - {label: de_LU, value: de_LU, language: de, country: LU, encoding: ISO-8859-1}
+    - {label: de_LU@euro, value: de_LU@euro, language: de, country: LU, encoding: ISO-8859-15}
+    - {label: doi_IN, value: doi_IN, language: doi, country: IN, encoding: UTF-8}
+    - {label: dsb_DE, value: dsb_DE, language: dsb, country: DE, encoding: UTF-8}
+    - {label: dv_MV, value: dv_MV, language: dv, country: MV, encoding: UTF-8}
+    - {label: dz_BT, value: dz_BT, language: dz, country: BT, encoding: UTF-8}
+    - {label: el_GR.UTF-8, value: el_GR.UTF-8, language: el, country: GR, encoding: UTF-8}
+    - {label: el_GR, value: el_GR, language: el, country: GR, encoding: ISO-8859-7}
+    - {label: el_GR@euro, value: el_GR@euro, language: el, country: GR, encoding: ISO-8859-7}
+    - {label: el_CY.UTF-8, value: el_CY.UTF-8, language: el, country: CY, encoding: UTF-8}
+    - {label: el_CY, value: el_CY, language: el, country: CY, encoding: ISO-8859-7}
+    - {label: en_AG, value: en_AG, language: en, country: AG, encoding: UTF-8}
+    - {label: en_AU.UTF-8, value: en_AU.UTF-8, language: en, country: AU, encoding: UTF-8}
+    - {label: en_AU, value: en_AU, language: en, country: AU, encoding: ISO-8859-1}
+    - {label: en_BW.UTF-8, value: en_BW.UTF-8, language: en, country: BW, encoding: UTF-8}
+    - {label: en_BW, value: en_BW, language: en, country: BW, encoding: ISO-8859-1}
+    - {label: en_CA.UTF-8, value: en_CA.UTF-8, language: en, country: CA, encoding: UTF-8}
+    - {label: en_CA, value: en_CA, language: en, country: CA, encoding: ISO-8859-1}
+    - {label: en_DK.UTF-8, value: en_DK.UTF-8, language: en, country: DK, encoding: UTF-8}
+    - {label: en_DK.ISO-8859-15, value: en_DK.ISO-8859-15, language: en, country: DK, encoding: ISO-8859-15}
+    - {label: en_DK, value: en_DK, language: en, country: DK, encoding: ISO-8859-1}
+    - {label: en_GB.UTF-8, value: en_GB.UTF-8, language: en, country: GB, encoding: UTF-8}
+    - {label: en_GB, value: en_GB, language: en, country: GB, encoding: ISO-8859-1}
+    - {label: en_GB.ISO-8859-15, value: en_GB.ISO-8859-15, language: en, country: GB, encoding: ISO-8859-15}
+    - {label: en_HK.UTF-8, value: en_HK.UTF-8, language: en, country: HK, encoding: UTF-8}
+    - {label: en_HK, value: en_HK, language: en, country: HK, encoding: ISO-8859-1}
+    - {label: en_IE.UTF-8, value: en_IE.UTF-8, language: en, country: IE, encoding: UTF-8}
+    - {label: en_IE, value: en_IE, language: en, country: IE, encoding: ISO-8859-1}
+    - {label: en_IE@euro, value: en_IE@euro, language: en, country: IE, encoding: ISO-8859-15}
+    - {label: en_IL, value: en_IL, language: en, country: IL, encoding: UTF-8}
+    - {label: en_IN, value: en_IN, language: en, country: IN, encoding: UTF-8}
+    - {label: en_NG, value: en_NG, language: en, country: NG, encoding: UTF-8}
+    - {label: en_NZ.UTF-8, value: en_NZ.UTF-8, language: en, country: NZ, encoding: UTF-8}
+    - {label: en_NZ, value: en_NZ, language: en, country: NZ, encoding: ISO-8859-1}
+    - {label: en_PH.UTF-8, value: en_PH.UTF-8, language: en, country: PH, encoding: UTF-8}
+    - {label: en_PH, value: en_PH, language: en, country: PH, encoding: ISO-8859-1}
+    - {label: en_SC.UTF-8, value: en_SC.UTF-8, language: en, country: SC, encoding: UTF-8}
+    - {label: en_SG.UTF-8, value: en_SG.UTF-8, language: en, country: SG, encoding: UTF-8}
+    - {label: en_SG, value: en_SG, language: en, country: SG, encoding: ISO-8859-1}
+    - {label: en_US.UTF-8, value: en_US.UTF-8, language: en, country: US, encoding: UTF-8}
+    - {label: en_US, value: en_US, language: en, country: US, encoding: ISO-8859-1}
+    - {label: en_US.ISO-8859-15, value: en_US.ISO-8859-15, language: en, country: US, encoding: ISO-8859-15}
+    - {label: en_ZA.UTF-8, value: en_ZA.UTF-8, language: en, country: ZA, encoding: UTF-8}
+    - {label: en_ZA, value: en_ZA, language: en, country: ZA, encoding: ISO-8859-1}
+    - {label: en_ZM, value: en_ZM, language: en, country: ZM, encoding: UTF-8}
+    - {label: en_ZW.UTF-8, value: en_ZW.UTF-8, language: en, country: ZW, encoding: UTF-8}
+    - {label: en_ZW, value: en_ZW, language: en, country: ZW, encoding: ISO-8859-1}
+    - {label: eo, value: eo, language: eo, country: null, encoding: UTF-8}
+    - {label: es_AR.UTF-8, value: es_AR.UTF-8, language: es, country: AR, encoding: UTF-8}
+    - {label: es_AR, value: es_AR, language: es, country: AR, encoding: ISO-8859-1}
+    - {label: es_BO.UTF-8, value: es_BO.UTF-8, language: es, country: BO, encoding: UTF-8}
+    - {label: es_BO, value: es_BO, language: es, country: BO, encoding: ISO-8859-1}
+    - {label: es_CL.UTF-8, value: es_CL.UTF-8, language: es, country: CL, encoding: UTF-8}
+    - {label: es_CL, value: es_CL, language: es, country: CL, encoding: ISO-8859-1}
+    - {label: es_CO.UTF-8, value: es_CO.UTF-8, language: es, country: CO, encoding: UTF-8}
+    - {label: es_CO, value: es_CO, language: es, country: CO, encoding: ISO-8859-1}
+    - {label: es_CR.UTF-8, value: es_CR.UTF-8, language: es, country: CR, encoding: UTF-8}
+    - {label: es_CR, value: es_CR, language: es, country: CR, encoding: ISO-8859-1}
+    - {label: es_CU, value: es_CU, language: es, country: CU, encoding: UTF-8}
+    - {label: es_DO.UTF-8, value: es_DO.UTF-8, language: es, country: DO, encoding: UTF-8}
+    - {label: es_DO, value: es_DO, language: es, country: DO, encoding: ISO-8859-1}
+    - {label: es_EC.UTF-8, value: es_EC.UTF-8, language: es, country: EC, encoding: UTF-8}
+    - {label: es_EC, value: es_EC, language: es, country: EC, encoding: ISO-8859-1}
+    - {label: es_ES.UTF-8, value: es_ES.UTF-8, language: es, country: ES, encoding: UTF-8}
+    - {label: es_ES, value: es_ES, language: es, country: ES, encoding: ISO-8859-1}
+    - {label: es_ES@euro, value: es_ES@euro, language: es, country: ES, encoding: ISO-8859-15}
+    - {label: es_GT.UTF-8, value: es_GT.UTF-8, language: es, country: GT, encoding: UTF-8}
+    - {label: es_GT, value: es_GT, language: es, country: GT, encoding: ISO-8859-1}
+    - {label: es_HN.UTF-8, value: es_HN.UTF-8, language: es, country: HN, encoding: UTF-8}
+    - {label: es_HN, value: es_HN, language: es, country: HN, encoding: ISO-8859-1}
+    - {label: es_MX.UTF-8, value: es_MX.UTF-8, language: es, country: MX, encoding: UTF-8}
+    - {label: es_MX, value: es_MX, language: es, country: MX, encoding: ISO-8859-1}
+    - {label: es_NI.UTF-8, value: es_NI.UTF-8, language: es, country: NI, encoding: UTF-8}
+    - {label: es_NI, value: es_NI, language: es, country: NI, encoding: ISO-8859-1}
+    - {label: es_PA.UTF-8, value: es_PA.UTF-8, language: es, country: PA, encoding: UTF-8}
+    - {label: es_PA, value: es_PA, language: es, country: PA, encoding: ISO-8859-1}
+    - {label: es_PE.UTF-8, value: es_PE.UTF-8, language: es, country: PE, encoding: UTF-8}
+    - {label: es_PE, value: es_PE, language: es, country: PE, encoding: ISO-8859-1}
+    - {label: es_PR.UTF-8, value: es_PR.UTF-8, language: es, country: PR, encoding: UTF-8}
+    - {label: es_PR, value: es_PR, language: es, country: PR, encoding: ISO-8859-1}
+    - {label: es_PY.UTF-8, value: es_PY.UTF-8, language: es, country: PY, encoding: UTF-8}
+    - {label: es_PY, value: es_PY, language: es, country: PY, encoding: ISO-8859-1}
+    - {label: es_SV.UTF-8, value: es_SV.UTF-8, language: es, country: SV, encoding: UTF-8}
+    - {label: es_SV, value: es_SV, language: es, country: SV, encoding: ISO-8859-1}
+    - {label: es_US.UTF-8, value: es_US.UTF-8, language: es, country: US, encoding: UTF-8}
+    - {label: es_US, value: es_US, language: es, country: US, encoding: ISO-8859-1}
+    - {label: es_UY.UTF-8, value: es_UY.UTF-8, language: es, country: UY, encoding: UTF-8}
+    - {label: es_UY, value: es_UY, language: es, country: UY, encoding: ISO-8859-1}
+    - {label: es_VE.UTF-8, value: es_VE.UTF-8, language: es, country: VE, encoding: UTF-8}
+    - {label: es_VE, value: es_VE, language: es, country: VE, encoding: ISO-8859-1}
+    - {label: et_EE.UTF-8, value: et_EE.UTF-8, language: et, country: EE, encoding: UTF-8}
+    - {label: et_EE, value: et_EE, language: et, country: EE, encoding: ISO-8859-1}
+    - {label: et_EE.ISO-8859-15, value: et_EE.ISO-8859-15, language: et, country: EE, encoding: ISO-8859-15}
+    - {label: eu_ES.UTF-8, value: eu_ES.UTF-8, language: eu, country: ES, encoding: UTF-8}
+    - {label: eu_ES, value: eu_ES, language: eu, country: ES, encoding: ISO-8859-1}
+    - {label: eu_ES@euro, value: eu_ES@euro, language: eu, country: ES, encoding: ISO-8859-15}
+    - {label: eu_FR.UTF-8, value: eu_FR.UTF-8, language: eu, country: FR, encoding: UTF-8}
+    - {label: eu_FR, value: eu_FR, language: eu, country: FR, encoding: ISO-8859-1}
+    - {label: eu_FR@euro, value: eu_FR@euro, language: eu, country: FR, encoding: ISO-8859-15}
+    - {label: fa_IR, value: fa_IR, language: fa, country: IR, encoding: UTF-8}
+    - {label: ff_SN, value: ff_SN, language: ff, country: SN, encoding: UTF-8}
+    - {label: fi_FI.UTF-8, value: fi_FI.UTF-8, language: fi, country: FI, encoding: UTF-8}
+    - {label: fi_FI, value: fi_FI, language: fi, country: FI, encoding: ISO-8859-1}
+    - {label: fi_FI@euro, value: fi_FI@euro, language: fi, country: FI, encoding: ISO-8859-15}
+    - {label: fil_PH, value: fil_PH, language: fil, country: PH, encoding: UTF-8}
+    - {label: fo_FO.UTF-8, value: fo_FO.UTF-8, language: fo, country: FO, encoding: UTF-8}
+    - {label: fo_FO, value: fo_FO, language: fo, country: FO, encoding: ISO-8859-1}
+    - {label: fr_BE.UTF-8, value: fr_BE.UTF-8, language: fr, country: BE, encoding: UTF-8}
+    - {label: fr_BE, value: fr_BE, language: fr, country: BE, encoding: ISO-8859-1}
+    - {label: fr_BE@euro, value: fr_BE@euro, language: fr, country: BE, encoding: ISO-8859-15}
+    - {label: fr_CA.UTF-8, value: fr_CA.UTF-8, language: fr, country: CA, encoding: UTF-8}
+    - {label: fr_CA, value: fr_CA, language: fr, country: CA, encoding: ISO-8859-1}
+    - {label: fr_CH.UTF-8, value: fr_CH.UTF-8, language: fr, country: CH, encoding: UTF-8}
+    - {label: fr_CH, value: fr_CH, language: fr, country: CH, encoding: ISO-8859-1}
+    - {label: fr_FR.UTF-8, value: fr_FR.UTF-8, language: fr, country: FR, encoding: UTF-8}
+    - {label: fr_FR, value: fr_FR, language: fr, country: FR, encoding: ISO-8859-1}
+    - {label: fr_FR@euro, value: fr_FR@euro, language: fr, country: FR, encoding: ISO-8859-15}
+    - {label: fr_LU.UTF-8, value: fr_LU.UTF-8, language: fr, country: LU, encoding: UTF-8}
+    - {label: fr_LU, value: fr_LU, language: fr, country: LU, encoding: ISO-8859-1}
+    - {label: fr_LU@euro, value: fr_LU@euro, language: fr, country: LU, encoding: ISO-8859-15}
+    - {label: fur_IT, value: fur_IT, language: fur, country: IT, encoding: UTF-8}
+    - {label: fy_NL, value: fy_NL, language: fy, country: NL, encoding: UTF-8}
+    - {label: fy_DE, value: fy_DE, language: fy, country: DE, encoding: UTF-8}
+    - {label: ga_IE.UTF-8, value: ga_IE.UTF-8, language: ga, country: IE, encoding: UTF-8}
+    - {label: ga_IE, value: ga_IE, language: ga, country: IE, encoding: ISO-8859-1}
+    - {label: ga_IE@euro, value: ga_IE@euro, language: ga, country: IE, encoding: ISO-8859-15}
+    - {label: gbm_IN, value: gbm_IN, language: gbm, country: IN, encoding: UTF-8}
+    - {label: gd_GB.UTF-8, value: gd_GB.UTF-8, language: gd, country: GB, encoding: UTF-8}
+    - {label: gd_GB, value: gd_GB, language: gd, country: GB, encoding: ISO-8859-15}
+    - {label: gez_ER, value: gez_ER, language: gez, country: ER, encoding: UTF-8}
+    - {label: gez_ER@abegede, value: gez_ER@abegede, language: gez, country: ER, encoding: UTF-8}
+    - {label: gez_ET, value: gez_ET, language: gez, country: ET, encoding: UTF-8}
+    - {label: gez_ET@abegede, value: gez_ET@abegede, language: gez, country: ET, encoding: UTF-8}
+    - {label: gl_ES.UTF-8, value: gl_ES.UTF-8, language: gl, country: ES, encoding: UTF-8}
+    - {label: gl_ES, value: gl_ES, language: gl, country: ES, encoding: ISO-8859-1}
+    - {label: gl_ES@euro, value: gl_ES@euro, language: gl, country: ES, encoding: ISO-8859-15}
+    - {label: gu_IN, value: gu_IN, language: gu, country: IN, encoding: UTF-8}
+    - {label: gv_GB.UTF-8, value: gv_GB.UTF-8, language: gv, country: GB, encoding: UTF-8}
+    - {label: gv_GB, value: gv_GB, language: gv, country: GB, encoding: ISO-8859-1}
+    - {label: ha_NG, value: ha_NG, language: ha, country: NG, encoding: UTF-8}
+    - {label: hak_TW, value: hak_TW, language: hak, country: TW, encoding: UTF-8}
+    - {label: he_IL.UTF-8, value: he_IL.UTF-8, language: he, country: IL, encoding: UTF-8}
+    - {label: he_IL, value: he_IL, language: he, country: IL, encoding: ISO-8859-8}
+    - {label: hi_IN, value: hi_IN, language: hi, country: IN, encoding: UTF-8}
+    - {label: hif_FJ, value: hif_FJ, language: hif, country: FJ, encoding: UTF-8}
+    - {label: hne_IN, value: hne_IN, language: hne, country: IN, encoding: UTF-8}
+    - {label: hr_HR.UTF-8, value: hr_HR.UTF-8, language: hr, country: HR, encoding: UTF-8}
+    - {label: hr_HR, value: hr_HR, language: hr, country: HR, encoding: ISO-8859-2}
+    - {label: hsb_DE.UTF-8, value: hsb_DE.UTF-8, language: hsb, country: DE, encoding: UTF-8}
+    - {label: hsb_DE, value: hsb_DE, language: hsb, country: DE, encoding: ISO-8859-2}
+    - {label: ht_HT, value: ht_HT, language: ht, country: HT, encoding: UTF-8}
+    - {label: hu_HU.UTF-8, value: hu_HU.UTF-8, language: hu, country: HU, encoding: UTF-8}
+    - {label: hu_HU, value: hu_HU, language: hu, country: HU, encoding: ISO-8859-2}
+    - {label: hy_AM, value: hy_AM, language: hy, country: AM, encoding: UTF-8}
+    - {label: hy_AM.ARMSCII-8, value: hy_AM.ARMSCII-8, language: hy, country: AM, encoding: ARMSCII-8}
+    - {label: ia_FR, value: ia_FR, language: ia, country: FR, encoding: UTF-8}
+    - {label: id_ID.UTF-8, value: id_ID.UTF-8, language: id, country: ID, encoding: UTF-8}
+    - {label: id_ID, value: id_ID, language: id, country: ID, encoding: ISO-8859-1}
+    - {label: ig_NG, value: ig_NG, language: ig, country: NG, encoding: UTF-8}
+    - {label: ik_CA, value: ik_CA, language: ik, country: CA, encoding: UTF-8}
+    - {label: is_IS.UTF-8, value: is_IS.UTF-8, language: is, country: IS, encoding: UTF-8}
+    - {label: is_IS, value: is_IS, language: is, country: IS, encoding: ISO-8859-1}
+    - {label: it_CH.UTF-8, value: it_CH.UTF-8, language: it, country: CH, encoding: UTF-8}
+    - {label: it_CH, value: it_CH, language: it, country: CH, encoding: ISO-8859-1}
+    - {label: it_IT.UTF-8, value: it_IT.UTF-8, language: it, country: IT, encoding: UTF-8}
+    - {label: it_IT, value: it_IT, language: it, country: IT, encoding: ISO-8859-1}
+    - {label: it_IT@euro, value: it_IT@euro, language: it, country: IT, encoding: ISO-8859-15}
+    - {label: iu_CA, value: iu_CA, language: iu, country: CA, encoding: UTF-8}
+    - {label: ja_JP.UTF-8, value: ja_JP.UTF-8, language: ja, country: JP, encoding: UTF-8}
+    - {label: ja_JP.EUC-JP, value: ja_JP.EUC-JP, language: ja, country: JP, encoding: EUC-JP}
+    - {label: ka_GE.UTF-8, value: ka_GE.UTF-8, language: ka, country: GE, encoding: UTF-8}
+    - {label: ka_GE, value: ka_GE, language: ka, country: GE, encoding: GEORGIAN-PS}
+    - {label: kab_DZ, value: kab_DZ, language: kab, country: DZ, encoding: UTF-8}
+    - {label: kk_KZ.UTF-8, value: kk_KZ.UTF-8, language: kk, country: KZ, encoding: UTF-8}
+    - {label: kk_KZ, value: kk_KZ, language: kk, country: KZ, encoding: PT154}
+    - {label: kk_KZ.RK1048, value: kk_KZ.RK1048, language: kk, country: KZ, encoding: RK1048}
+    - {label: kl_GL.UTF-8, value: kl_GL.UTF-8, language: kl, country: GL, encoding: UTF-8}
+    - {label: kl_GL, value: kl_GL, language: kl, country: GL, encoding: ISO-8859-1}
+    - {label: km_KH, value: km_KH, language: km, country: KH, encoding: UTF-8}
+    - {label: kn_IN, value: kn_IN, language: kn, country: IN, encoding: UTF-8}
+    - {label: ko_KR.UTF-8, value: ko_KR.UTF-8, language: ko, country: KR, encoding: UTF-8}
+    - {label: ko_KR.EUC-KR, value: ko_KR.EUC-KR, language: ko, country: KR, encoding: EUC-KR}
+    - {label: kok_IN, value: kok_IN, language: kok, country: IN, encoding: UTF-8}
+    - {label: ks_IN, value: ks_IN, language: ks, country: IN, encoding: UTF-8}
+    - {label: ks_IN@devanagari, value: ks_IN@devanagari, language: ks, country: IN, encoding: UTF-8}
+    - {label: ku_TR.UTF-8, value: ku_TR.UTF-8, language: ku, country: TR, encoding: UTF-8}
+    - {label: ku_TR, value: ku_TR, language: ku, country: TR, encoding: ISO-8859-9}
+    - {label: kv_RU, value: kv_RU, language: kv, country: RU, encoding: UTF-8}
+    - {label: kw_GB.UTF-8, value: kw_GB.UTF-8, language: kw, country: GB, encoding: UTF-8}
+    - {label: kw_GB, value: kw_GB, language: kw, country: GB, encoding: ISO-8859-1}
+    - {label: ky_KG, value: ky_KG, language: ky, country: KG, encoding: UTF-8}
+    - {label: lb_LU, value: lb_LU, language: lb, country: LU, encoding: UTF-8}
+    - {label: lg_UG.UTF-8, value: lg_UG.UTF-8, language: lg, country: UG, encoding: UTF-8}
+    - {label: lg_UG, value: lg_UG, language: lg, country: UG, encoding: ISO-8859-10}
+    - {label: li_BE, value: li_BE, language: li, country: BE, encoding: UTF-8}
+    - {label: li_NL, value: li_NL, language: li, country: NL, encoding: UTF-8}
+    - {label: lij_IT, value: lij_IT, language: lij, country: IT, encoding: UTF-8}
+    - {label: ln_CD, value: ln_CD, language: ln, country: CD, encoding: UTF-8}
+    - {label: lo_LA, value: lo_LA, language: lo, country: LA, encoding: UTF-8}
+    - {label: lt_LT.UTF-8, value: lt_LT.UTF-8, language: lt, country: LT, encoding: UTF-8}
+    - {label: lt_LT, value: lt_LT, language: lt, country: LT, encoding: ISO-8859-13}
+    - {label: ltg_LV.UTF-8, value: ltg_LV.UTF-8, language: ltg, country: LV, encoding: UTF-8}
+    - {label: lv_LV.UTF-8, value: lv_LV.UTF-8, language: lv, country: LV, encoding: UTF-8}
+    - {label: lv_LV, value: lv_LV, language: lv, country: LV, encoding: ISO-8859-13}
+    - {label: lzh_TW, value: lzh_TW, language: lzh, country: TW, encoding: UTF-8}
+    - {label: mag_IN, value: mag_IN, language: mag, country: IN, encoding: UTF-8}
+    - {label: mai_IN, value: mai_IN, language: mai, country: IN, encoding: UTF-8}
+    - {label: mai_NP, value: mai_NP, language: mai, country: NP, encoding: UTF-8}
+    - {label: mdf_RU, value: mdf_RU, language: mdf, country: RU, encoding: UTF-8}
+    - {label: mfe_MU, value: mfe_MU, language: mfe, country: MU, encoding: UTF-8}
+    - {label: mg_MG.UTF-8, value: mg_MG.UTF-8, language: mg, country: MG, encoding: UTF-8}
+    - {label: mg_MG, value: mg_MG, language: mg, country: MG, encoding: ISO-8859-15}
+    - {label: mhr_RU, value: mhr_RU, language: mhr, country: RU, encoding: UTF-8}
+    - {label: mi_NZ.UTF-8, value: mi_NZ.UTF-8, language: mi, country: NZ, encoding: UTF-8}
+    - {label: mi_NZ, value: mi_NZ, language: mi, country: NZ, encoding: ISO-8859-13}
+    - {label: miq_NI, value: miq_NI, language: miq, country: NI, encoding: UTF-8}
+    - {label: mjw_IN, value: mjw_IN, language: mjw, country: IN, encoding: UTF-8}
+    - {label: mk_MK.UTF-8, value: mk_MK.UTF-8, language: mk, country: MK, encoding: UTF-8}
+    - {label: mk_MK, value: mk_MK, language: mk, country: MK, encoding: ISO-8859-5}
+    - {label: ml_IN, value: ml_IN, language: ml, country: IN, encoding: UTF-8}
+    - {label: mn_MN, value: mn_MN, language: mn, country: MN, encoding: UTF-8}
+    - {label: mni_IN, value: mni_IN, language: mni, country: IN, encoding: UTF-8}
+    - {label: mnw_MM, value: mnw_MM, language: mnw, country: MM, encoding: UTF-8}
+    - {label: mr_IN, value: mr_IN, language: mr, country: IN, encoding: UTF-8}
+    - {label: ms_MY.UTF-8, value: ms_MY.UTF-8, language: ms, country: MY, encoding: UTF-8}
+    - {label: ms_MY, value: ms_MY, language: ms, country: MY, encoding: ISO-8859-1}
+    - {label: mt_MT.UTF-8, value: mt_MT.UTF-8, language: mt, country: MT, encoding: UTF-8}
+    - {label: mt_MT, value: mt_MT, language: mt, country: MT, encoding: ISO-8859-3}
+    - {label: my_MM, value: my_MM, language: my, country: MM, encoding: UTF-8}
+    - {label: nan_TW, value: nan_TW, language: nan, country: TW, encoding: UTF-8}
+    - {label: nan_TW@latin, value: nan_TW@latin, language: nan, country: TW, encoding: UTF-8}
+    - {label: nb_NO.UTF-8, value: nb_NO.UTF-8, language: nb, country: 'NO', encoding: UTF-8}
+    - {label: nb_NO, value: nb_NO, language: nb, country: 'NO', encoding: ISO-8859-1}
+    - {label: nds_DE, value: nds_DE, language: nds, country: DE, encoding: UTF-8}
+    - {label: nds_NL, value: nds_NL, language: nds, country: NL, encoding: UTF-8}
+    - {label: ne_NP, value: ne_NP, language: ne, country: NP, encoding: UTF-8}
+    - {label: nhn_MX, value: nhn_MX, language: nhn, country: MX, encoding: UTF-8}
+    - {label: niu_NU, value: niu_NU, language: niu, country: NU, encoding: UTF-8}
+    - {label: niu_NZ, value: niu_NZ, language: niu, country: NZ, encoding: UTF-8}
+    - {label: nl_AW, value: nl_AW, language: nl, country: AW, encoding: UTF-8}
+    - {label: nl_BE.UTF-8, value: nl_BE.UTF-8, language: nl, country: BE, encoding: UTF-8}
+    - {label: nl_BE, value: nl_BE, language: nl, country: BE, encoding: ISO-8859-1}
+    - {label: nl_BE@euro, value: nl_BE@euro, language: nl, country: BE, encoding: ISO-8859-15}
+    - {label: nl_NL.UTF-8, value: nl_NL.UTF-8, language: nl, country: NL, encoding: UTF-8}
+    - {label: nl_NL, value: nl_NL, language: nl, country: NL, encoding: ISO-8859-1}
+    - {label: nl_NL@euro, value: nl_NL@euro, language: nl, country: NL, encoding: ISO-8859-15}
+    - {label: nn_NO.UTF-8, value: nn_NO.UTF-8, language: nn, country: 'NO', encoding: UTF-8}
+    - {label: nn_NO, value: nn_NO, language: nn, country: 'NO', encoding: ISO-8859-1}
+    - {label: nr_ZA, value: nr_ZA, language: nr, country: ZA, encoding: UTF-8}
+    - {label: nso_ZA, value: nso_ZA, language: nso, country: ZA, encoding: UTF-8}
+    - {label: oc_FR.UTF-8, value: oc_FR.UTF-8, language: oc, country: FR, encoding: UTF-8}
+    - {label: oc_FR, value: oc_FR, language: oc, country: FR, encoding: ISO-8859-1}
+    - {label: om_ET, value: om_ET, language: om, country: ET, encoding: UTF-8}
+    - {label: om_KE.UTF-8, value: om_KE.UTF-8, language: om, country: KE, encoding: UTF-8}
+    - {label: om_KE, value: om_KE, language: om, country: KE, encoding: ISO-8859-1}
+    - {label: or_IN, value: or_IN, language: or, country: IN, encoding: UTF-8}
+    - {label: os_RU, value: os_RU, language: os, country: RU, encoding: UTF-8}
+    - {label: pa_IN, value: pa_IN, language: pa, country: IN, encoding: UTF-8}
+    - {label: pa_PK, value: pa_PK, language: pa, country: PK, encoding: UTF-8}
+    - {label: pap_AW, value: pap_AW, language: pap, country: AW, encoding: UTF-8}
+    - {label: pap_CW, value: pap_CW, language: pap, country: CW, encoding: UTF-8}
+    - {label: pl_PL.UTF-8, value: pl_PL.UTF-8, language: pl, country: PL, encoding: UTF-8}
+    - {label: pl_PL, value: pl_PL, language: pl, country: PL, encoding: ISO-8859-2}
+    - {label: ps_AF, value: ps_AF, language: ps, country: AF, encoding: UTF-8}
+    - {label: pt_BR.UTF-8, value: pt_BR.UTF-8, language: pt, country: BR, encoding: UTF-8}
+    - {label: pt_BR, value: pt_BR, language: pt, country: BR, encoding: ISO-8859-1}
+    - {label: pt_PT.UTF-8, value: pt_PT.UTF-8, language: pt, country: PT, encoding: UTF-8}
+    - {label: pt_PT, value: pt_PT, language: pt, country: PT, encoding: ISO-8859-1}
+    - {label: pt_PT@euro, value: pt_PT@euro, language: pt, country: PT, encoding: ISO-8859-15}
+    - {label: quz_PE, value: quz_PE, language: quz, country: PE, encoding: UTF-8}
+    - {label: raj_IN, value: raj_IN, language: raj, country: IN, encoding: UTF-8}
+    - {label: rif_MA, value: rif_MA, language: rif, country: MA, encoding: UTF-8}
+    - {label: ro_RO.UTF-8, value: ro_RO.UTF-8, language: ro, country: RO, encoding: UTF-8}
+    - {label: ro_RO, value: ro_RO, language: ro, country: RO, encoding: ISO-8859-2}
+    - {label: ru_RU.UTF-8, value: ru_RU.UTF-8, language: ru, country: RU, encoding: UTF-8}
+    - {label: ru_RU.KOI8-R, value: ru_RU.KOI8-R, language: ru, country: RU, encoding: KOI8-R}
+    - {label: ru_RU, value: ru_RU, language: ru, country: RU, encoding: ISO-8859-5}
+    - {label: ru_RU.CP1251, value: ru_RU.CP1251, language: ru, country: RU, encoding: CP1251}
+    - {label: ru_UA.UTF-8, value: ru_UA.UTF-8, language: ru, country: UA, encoding: UTF-8}
+    - {label: ru_UA, value: ru_UA, language: ru, country: UA, encoding: KOI8-U}
+    - {label: rw_RW, value: rw_RW, language: rw, country: RW, encoding: UTF-8}
+    - {label: sa_IN, value: sa_IN, language: sa, country: IN, encoding: UTF-8}
+    - {label: sah_RU, value: sah_RU, language: sah, country: RU, encoding: UTF-8}
+    - {label: sat_IN, value: sat_IN, language: sat, country: IN, encoding: UTF-8}
+    - {label: sc_IT, value: sc_IT, language: sc, country: IT, encoding: UTF-8}
+    - {label: scn_IT, value: scn_IT, language: scn, country: IT, encoding: UTF-8}
+    - {label: sd_IN, value: sd_IN, language: sd, country: IN, encoding: UTF-8}
+    - {label: sd_IN@devanagari, value: sd_IN@devanagari, language: sd, country: IN, encoding: UTF-8}
+    - {label: se_NO, value: se_NO, language: se, country: 'NO', encoding: UTF-8}
+    - {label: sgs_LT, value: sgs_LT, language: sgs, country: LT, encoding: UTF-8}
+    - {label: shn_MM, value: shn_MM, language: shn, country: MM, encoding: UTF-8}
+    - {label: shs_CA, value: shs_CA, language: shs, country: CA, encoding: UTF-8}
+    - {label: si_LK, value: si_LK, language: si, country: LK, encoding: UTF-8}
+    - {label: sid_ET, value: sid_ET, language: sid, country: ET, encoding: UTF-8}
+    - {label: sk_SK.UTF-8, value: sk_SK.UTF-8, language: sk, country: SK, encoding: UTF-8}
+    - {label: sk_SK, value: sk_SK, language: sk, country: SK, encoding: ISO-8859-2}
+    - {label: sl_SI.UTF-8, value: sl_SI.UTF-8, language: sl, country: SI, encoding: UTF-8}
+    - {label: sl_SI, value: sl_SI, language: sl, country: SI, encoding: ISO-8859-2}
+    - {label: sm_WS, value: sm_WS, language: sm, country: WS, encoding: UTF-8}
+    - {label: so_DJ.UTF-8, value: so_DJ.UTF-8, language: so, country: DJ, encoding: UTF-8}
+    - {label: so_DJ, value: so_DJ, language: so, country: DJ, encoding: ISO-8859-1}
+    - {label: so_ET, value: so_ET, language: so, country: ET, encoding: UTF-8}
+    - {label: so_KE.UTF-8, value: so_KE.UTF-8, language: so, country: KE, encoding: UTF-8}
+    - {label: so_KE, value: so_KE, language: so, country: KE, encoding: ISO-8859-1}
+    - {label: so_SO.UTF-8, value: so_SO.UTF-8, language: so, country: SO, encoding: UTF-8}
+    - {label: so_SO, value: so_SO, language: so, country: SO, encoding: ISO-8859-1}
+    - {label: sq_AL.UTF-8, value: sq_AL.UTF-8, language: sq, country: AL, encoding: UTF-8}
+    - {label: sq_AL, value: sq_AL, language: sq, country: AL, encoding: ISO-8859-1}
+    - {label: sq_MK, value: sq_MK, language: sq, country: MK, encoding: UTF-8}
+    - {label: sr_ME, value: sr_ME, language: sr, country: ME, encoding: UTF-8}
+    - {label: sr_RS, value: sr_RS, language: sr, country: RS, encoding: UTF-8}
+    - {label: sr_RS@latin, value: sr_RS@latin, language: sr, country: RS, encoding: UTF-8}
+    - {label: ss_ZA, value: ss_ZA, language: ss, country: ZA, encoding: UTF-8}
+    - {label: ssy_ER, value: ssy_ER, language: ssy, country: ER, encoding: UTF-8}
+    - {label: st_ZA.UTF-8, value: st_ZA.UTF-8, language: st, country: ZA, encoding: UTF-8}
+    - {label: st_ZA, value: st_ZA, language: st, country: ZA, encoding: ISO-8859-1}
+    - {label: su_ID, value: su_ID, language: su, country: ID, encoding: UTF-8}
+    - {label: sv_FI.UTF-8, value: sv_FI.UTF-8, language: sv, country: FI, encoding: UTF-8}
+    - {label: sv_FI, value: sv_FI, language: sv, country: FI, encoding: ISO-8859-1}
+    - {label: sv_FI@euro, value: sv_FI@euro, language: sv, country: FI, encoding: ISO-8859-15}
+    - {label: sv_SE.UTF-8, value: sv_SE.UTF-8, language: sv, country: SE, encoding: UTF-8}
+    - {label: sv_SE, value: sv_SE, language: sv, country: SE, encoding: ISO-8859-1}
+    - {label: sv_SE.ISO-8859-15, value: sv_SE.ISO-8859-15, language: sv, country: SE, encoding: ISO-8859-15}
+    - {label: sw_KE, value: sw_KE, language: sw, country: KE, encoding: UTF-8}
+    - {label: sw_TZ, value: sw_TZ, language: sw, country: TZ, encoding: UTF-8}
+    - {label: syr, value: syr, language: syr, country: null, encoding: UTF-8}
+    - {label: szl_PL, value: szl_PL, language: szl, country: PL, encoding: UTF-8}
+    - {label: ta_IN, value: ta_IN, language: ta, country: IN, encoding: UTF-8}
+    - {label: ta_LK, value: ta_LK, language: ta, country: LK, encoding: UTF-8}
+    - {label: tcy_IN.UTF-8, value: tcy_IN.UTF-8, language: tcy, country: IN, encoding: UTF-8}
+    - {label: te_IN, value: te_IN, language: te, country: IN, encoding: UTF-8}
+    - {label: tg_TJ.UTF-8, value: tg_TJ.UTF-8, language: tg, country: TJ, encoding: UTF-8}
+    - {label: tg_TJ, value: tg_TJ, language: tg, country: TJ, encoding: KOI8-T}
+    - {label: th_TH.UTF-8, value: th_TH.UTF-8, language: th, country: TH, encoding: UTF-8}
+    - {label: th_TH, value: th_TH, language: th, country: TH, encoding: TIS-620}
+    - {label: the_NP, value: the_NP, language: the, country: NP, encoding: UTF-8}
+    - {label: ti_ER, value: ti_ER, language: ti, country: ER, encoding: UTF-8}
+    - {label: ti_ET, value: ti_ET, language: ti, country: ET, encoding: UTF-8}
+    - {label: tig_ER, value: tig_ER, language: tig, country: ER, encoding: UTF-8}
+    - {label: tk_TM, value: tk_TM, language: tk, country: TM, encoding: UTF-8}
+    - {label: tl_PH.UTF-8, value: tl_PH.UTF-8, language: tl, country: PH, encoding: UTF-8}
+    - {label: tl_PH, value: tl_PH, language: tl, country: PH, encoding: ISO-8859-1}
+    - {label: tn_ZA, value: tn_ZA, language: tn, country: ZA, encoding: UTF-8}
+    - {label: to_TO, value: to_TO, language: to, country: TO, encoding: UTF-8}
+    - {label: tok, value: tok, language: tok, country: null, encoding: UTF-8}
+    - {label: tpi_PG, value: tpi_PG, language: tpi, country: PG, encoding: UTF-8}
+    - {label: tr_CY.UTF-8, value: tr_CY.UTF-8, language: tr, country: CY, encoding: UTF-8}
+    - {label: tr_CY, value: tr_CY, language: tr, country: CY, encoding: ISO-8859-9}
+    - {label: tr_TR.UTF-8, value: tr_TR.UTF-8, language: tr, country: TR, encoding: UTF-8}
+    - {label: tr_TR, value: tr_TR, language: tr, country: TR, encoding: ISO-8859-9}
+    - {label: ts_ZA, value: ts_ZA, language: ts, country: ZA, encoding: UTF-8}
+    - {label: tt_RU, value: tt_RU, language: tt, country: RU, encoding: UTF-8}
+    - {label: tt_RU@iqtelif, value: tt_RU@iqtelif, language: tt, country: RU, encoding: UTF-8}
+    - {label: ug_CN, value: ug_CN, language: ug, country: CN, encoding: UTF-8}
+    - {label: uk_UA.UTF-8, value: uk_UA.UTF-8, language: uk, country: UA, encoding: UTF-8}
+    - {label: uk_UA, value: uk_UA, language: uk, country: UA, encoding: KOI8-U}
+    - {label: unm_US, value: unm_US, language: unm, country: US, encoding: UTF-8}
+    - {label: ur_IN, value: ur_IN, language: ur, country: IN, encoding: UTF-8}
+    - {label: ur_PK, value: ur_PK, language: ur, country: PK, encoding: UTF-8}
+    - {label: uz_UZ.UTF-8, value: uz_UZ.UTF-8, language: uz, country: UZ, encoding: UTF-8}
+    - {label: uz_UZ, value: uz_UZ, language: uz, country: UZ, encoding: ISO-8859-1}
+    - {label: uz_UZ@cyrillic, value: uz_UZ@cyrillic, language: uz, country: UZ, encoding: UTF-8}
+    - {label: ve_ZA, value: ve_ZA, language: ve, country: ZA, encoding: UTF-8}
+    - {label: vi_VN, value: vi_VN, language: vi, country: VN, encoding: UTF-8}
+    - {label: wa_BE.UTF-8, value: wa_BE.UTF-8, language: wa, country: BE, encoding: UTF-8}
+    - {label: wa_BE, value: wa_BE, language: wa, country: BE, encoding: ISO-8859-1}
+    - {label: wa_BE@euro, value: wa_BE@euro, language: wa, country: BE, encoding: ISO-8859-15}
+    - {label: wae_CH, value: wae_CH, language: wae, country: CH, encoding: UTF-8}
+    - {label: wal_ET, value: wal_ET, language: wal, country: ET, encoding: UTF-8}
+    - {label: wo_SN, value: wo_SN, language: wo, country: SN, encoding: UTF-8}
+    - {label: xh_ZA.UTF-8, value: xh_ZA.UTF-8, language: xh, country: ZA, encoding: UTF-8}
+    - {label: xh_ZA, value: xh_ZA, language: xh, country: ZA, encoding: ISO-8859-1}
+    - {label: yi_US.UTF-8, value: yi_US.UTF-8, language: yi, country: US, encoding: UTF-8}
+    - {label: yi_US, value: yi_US, language: yi, country: US, encoding: CP1255}
+    - {label: yo_NG, value: yo_NG, language: yo, country: NG, encoding: UTF-8}
+    - {label: yue_HK, value: yue_HK, language: yue, country: HK, encoding: UTF-8}
+    - {label: yuw_PG, value: yuw_PG, language: yuw, country: PG, encoding: UTF-8}
+    - {label: zgh_MA, value: zgh_MA, language: zgh, country: MA, encoding: UTF-8}
+    - {label: zh_CN.UTF-8, value: zh_CN.UTF-8, language: zh, country: CN, encoding: UTF-8}
+    - {label: zh_CN.GB18030, value: zh_CN.GB18030, language: zh, country: CN, encoding: GB18030}
+    - {label: zh_CN.GBK, value: zh_CN.GBK, language: zh, country: CN, encoding: GBK}
+    - {label: zh_CN, value: zh_CN, language: zh, country: CN, encoding: GB2312}
+    - {label: zh_HK.UTF-8, value: zh_HK.UTF-8, language: zh, country: HK, encoding: UTF-8}
+    - {label: zh_HK, value: zh_HK, language: zh, country: HK, encoding: BIG5-HKSCS}
+    - {label: zh_SG.UTF-8, value: zh_SG.UTF-8, language: zh, country: SG, encoding: UTF-8}
+    - {label: zh_SG.GBK, value: zh_SG.GBK, language: zh, country: SG, encoding: GBK}
+    - {label: zh_SG, value: zh_SG, language: zh, country: SG, encoding: GB2312}
+    - {label: zh_TW.UTF-8, value: zh_TW.UTF-8, language: zh, country: TW, encoding: UTF-8}
+    - {label: zh_TW.EUC-TW, value: zh_TW.EUC-TW, language: zh, country: TW, encoding: EUC-TW}
+    - {label: zh_TW, value: zh_TW, language: zh, country: TW, encoding: BIG5}
+    - {label: zu_ZA.UTF-8, value: zu_ZA.UTF-8, language: zu, country: ZA, encoding: UTF-8}
+    - {label: zu_ZA, value: zu_ZA, language: zu, country: ZA, encoding: ISO-8859-1}
+  keyboard_layouts:
+    - {label: 米国, value: us, requires_toggle: false}
+    - {label: アルバニア語, value: al, requires_toggle: false}
+    - {label: アラビア語, value: ara, requires_toggle: true}
+    - {label: アストゥリアス語, value: es(ast), requires_toggle: false}
+    - {label: バングラデシュ語, value: bd, requires_toggle: true}
+    - {label: ベラルーシ語, value: by, requires_toggle: true}
+    - {label: ベンガル語, value: in(ben), requires_toggle: true}
+    - {label: ベルギー語, value: be, requires_toggle: false}
+    - {label: ベルベル語 (ラテン), value: dz, requires_toggle: false}
+    - {label: ボスニア語, value: ba, requires_toggle: false}
+    - {label: ブラジル語, value: br, requires_toggle: false}
+    - {label: イギリス英語, value: gb, requires_toggle: false}
+    - {label: ブルガリア語 (BDS レイアウト), value: bg, requires_toggle: true}
+    - {label: ブルガリア語 (phonetic レイアウト), value: bg(phonetic), requires_toggle: true}
+    - {label: ビルマ語, value: mm, requires_toggle: true}
+    - {label: カナダ (フランス語), value: ca, requires_toggle: false}
+    - {label: カナダ (多言語), value: ca(multix), requires_toggle: false}
+    - {label: カタルニア語, value: es(cat), requires_toggle: false}
+    - {label: 中国語, value: cn, requires_toggle: false}
+    - {label: クロアチア語, value: hr, requires_toggle: false}
+    - {label: チェコ語, value: cz, requires_toggle: false}
+    - {label: デンマーク語, value: dk, requires_toggle: false}
+    - {label: オランダ語, value: nl, requires_toggle: false}
+    - {label: Dvorak, value: us(dvorak), requires_toggle: false}
+    - {label: ゾンカ語, value: bt, requires_toggle: true}
+    - {label: エスペラント語, value: epo, requires_toggle: false}
+    - {label: エストニア語, value: ee, requires_toggle: false}
+    - {label: エチオピア語, value: et, requires_toggle: true}
+    - {label: フィンランド語, value: fi, requires_toggle: false}
+    - {label: フランス語, value: fr(latin9), requires_toggle: false}
+    - {label: ジョージア語, value: ge, requires_toggle: true}
+    - {label: ドイツ語, value: de, requires_toggle: false}
+    - {label: ギリシャ語, value: gr, requires_toggle: true}
+    - {label: グジャラーティー語, value: in(guj), requires_toggle: true}
+    - {label: グルムキー文字, value: in(jhelum), requires_toggle: true}
+    - {label: ヘブライ語, value: il, requires_toggle: true}
+    - {label: ヒンディー語, value: in, requires_toggle: true}
+    - {label: ハンガリー語, value: hu, requires_toggle: false}
+    - {label: アイスランド語, value: is, requires_toggle: false}
+    - {label: アイルランド語, value: ie, requires_toggle: false}
+    - {label: イタリア語, value: it, requires_toggle: false}
+    - {label: 日本語, value: jp, requires_toggle: false}
+    - {label: カンナダ語, value: in(kan), requires_toggle: true}
+    - {label: カザーフ語, value: kz, requires_toggle: true}
+    - {label: クメール語, value: kh, requires_toggle: true}
+    - {label: キルギス語, value: kg, requires_toggle: true}
+    - {label: 朝鮮語, value: kr(kr104), requires_toggle: false}
+    - {label: クルド語 (F 配置), value: tr(ku_f), requires_toggle: false}
+    - {label: クルド語 (Q レイアウト), value: tr(ku), requires_toggle: false}
+    - {label: ラオ語, value: la, requires_toggle: true}
+    - {label: ラテンアメリカ語, value: latam, requires_toggle: false}
+    - {label: ラトビア語, value: lv, requires_toggle: false}
+    - {label: リトアニア語, value: lt, requires_toggle: true}
+    - {label: マケドニア語, value: mk, requires_toggle: true}
+    - {label: マラヤーラム語, value: in(mal), requires_toggle: true}
+    - {label: ネパール語, value: np, requires_toggle: true}
+    - {label: 北サーメ, value: no(smi), requires_toggle: false}
+    - {label: ノルウェー語, value: 'no', requires_toggle: false}
+    - {label: ペルシア語, value: ir, requires_toggle: true}
+    - {label: フィリピン, value: ph, requires_toggle: false}
+    - {label: ポーランド語, value: pl, requires_toggle: false}
+    - {label: ポルトガル語, value: pt, requires_toggle: false}
+    - {label: パンジャブ語, value: in(guru), requires_toggle: true}
+    - {label: ルーマニア語, value: ro, requires_toggle: false}
+    - {label: ロシア語, value: ru, requires_toggle: true}
+    - {label: セルビア語 (キリル文字), value: rs, requires_toggle: true}
+    - {label: シンド語, value: pk(snd), requires_toggle: true}
+    - {label: シンハラ語, value: lk, requires_toggle: true}
+    - {label: スロバキア語, value: sk, requires_toggle: false}
+    - {label: スロベニア語, value: si, requires_toggle: false}
+    - {label: スペイン語, value: es, requires_toggle: false}
+    - {label: スウェーデン語, value: se, requires_toggle: false}
+    - {label: スイス (フランス語), value: ch(fr), requires_toggle: false}
+    - {label: スイス (ドイツ語), value: ch, requires_toggle: false}
+    - {label: タジク語, value: tj, requires_toggle: true}
+    - {label: タミル語, value: in(tam), requires_toggle: true}
+    - {label: テルグ語, value: in(tel), requires_toggle: true}
+    - {label: タイ語, value: th, requires_toggle: true}
+    - {label: チベット語, value: cn(tib), requires_toggle: false}
+    - {label: トルコ語 (F 配置), value: tr(f), requires_toggle: false}
+    - {label: トルコ語 (Q レイアウト), value: tr, requires_toggle: false}
+    - {label: 台湾語, value: tw(indigenous), requires_toggle: false}
+    - {label: ウクライナ語, value: ua, requires_toggle: true}
+    - {label: ウイグル語, value: cn(ug), requires_toggle: false}
+    - {label: ベトナム語, value: vn, requires_toggle: false}
+  keyboard_toggles:
+    - {label: Caps Lock, value: Caps Lock}
+    - {label: 右 Alt (AltGr), value: Right Alt (AltGr)}
+    - {label: 右 Control, value: Right Control}
+    - {label: 右 Shift, value: Right Shift}
+    - {label: 右ロゴキー, value: Right Logo key}
+    - {label: メニューキー, value: Menu key}
+    - {label: Alt+Shift, value: Alt+Shift}
+    - {label: Control+Shift, value: Control+Shift}
+    - {label: Control+Alt, value: Control+Alt}
+    - {label: Alt+Caps Lock, value: Alt+Caps Lock}
+    - {label: 左 Control + 左 Shift, value: Left Control+Left Shift}
+    - {label: 左 Alt, value: Left Alt}
+    - {label: 左 Control, value: Left Control}
+    - {label: 左 Shift, value: Left Shift}
+    - {label: 左ロゴキー, value: Left Logo key}
+    - {label: Scroll Lock キー, value: Scroll Lock key}
+    - {label: 切り替えなし, value: No toggling}
+  timezones:
+    - {label: Africa/Abidjan, value: Africa/Abidjan, countries: [CI]}
+    - {label: Africa/Accra, value: Africa/Accra, countries: [GH]}
+    - {label: Africa/Addis_Ababa, value: Africa/Addis_Ababa, countries: [ET]}
+    - {label: Africa/Algiers, value: Africa/Algiers, countries: [DZ]}
+    - {label: Africa/Asmara, value: Africa/Asmara, countries: [ER]}
+    - {label: Africa/Bamako, value: Africa/Bamako, countries: [ML]}
+    - {label: Africa/Bangui, value: Africa/Bangui, countries: [CF]}
+    - {label: Africa/Banjul, value: Africa/Banjul, countries: [GM]}
+    - {label: Africa/Bissau, value: Africa/Bissau, countries: [GW]}
+    - {label: Africa/Blantyre, value: Africa/Blantyre, countries: [MW]}
+    - {label: Africa/Brazzaville, value: Africa/Brazzaville, countries: [CG]}
+    - {label: Africa/Bujumbura, value: Africa/Bujumbura, countries: [BI]}
+    - {label: Africa/Cairo, value: Africa/Cairo, countries: [EG]}
+    - {label: Africa/Casablanca, value: Africa/Casablanca, countries: [MA]}
+    - {label: Africa/Ceuta, value: Africa/Ceuta, countries: [ES]}
+    - {label: Africa/Conakry, value: Africa/Conakry, countries: [GN]}
+    - {label: Africa/Dakar, value: Africa/Dakar, countries: [SN]}
+    - {label: Africa/Dar_es_Salaam, value: Africa/Dar_es_Salaam, countries: [TZ]}
+    - {label: Africa/Djibouti, value: Africa/Djibouti, countries: [DJ]}
+    - {label: Africa/Douala, value: Africa/Douala, countries: [CM]}
+    - {label: Africa/El_Aaiun, value: Africa/El_Aaiun, countries: [EH]}
+    - {label: Africa/Freetown, value: Africa/Freetown, countries: [SL]}
+    - {label: Africa/Gaborone, value: Africa/Gaborone, countries: [BW]}
+    - {label: Africa/Harare, value: Africa/Harare, countries: [ZW]}
+    - {label: Africa/Johannesburg, value: Africa/Johannesburg, countries: [ZA]}
+    - {label: Africa/Juba, value: Africa/Juba, countries: [SS]}
+    - {label: Africa/Kampala, value: Africa/Kampala, countries: [UG]}
+    - {label: Africa/Khartoum, value: Africa/Khartoum, countries: [SD]}
+    - {label: Africa/Kigali, value: Africa/Kigali, countries: [RW]}
+    - {label: Africa/Kinshasa, value: Africa/Kinshasa, countries: [CD]}
+    - {label: Africa/Lagos, value: Africa/Lagos, countries: [NG]}
+    - {label: Africa/Libreville, value: Africa/Libreville, countries: [GA]}
+    - {label: Africa/Lome, value: Africa/Lome, countries: [TG]}
+    - {label: Africa/Luanda, value: Africa/Luanda, countries: [AO]}
+    - {label: Africa/Lubumbashi, value: Africa/Lubumbashi, countries: [CD]}
+    - {label: Africa/Lusaka, value: Africa/Lusaka, countries: [ZM]}
+    - {label: Africa/Malabo, value: Africa/Malabo, countries: [GQ]}
+    - {label: Africa/Maputo, value: Africa/Maputo, countries: [MZ]}
+    - {label: Africa/Maseru, value: Africa/Maseru, countries: [LS]}
+    - {label: Africa/Mbabane, value: Africa/Mbabane, countries: [SZ]}
+    - {label: Africa/Mogadishu, value: Africa/Mogadishu, countries: [SO]}
+    - {label: Africa/Monrovia, value: Africa/Monrovia, countries: [LR]}
+    - {label: Africa/Nairobi, value: Africa/Nairobi, countries: [KE]}
+    - {label: Africa/Ndjamena, value: Africa/Ndjamena, countries: [TD]}
+    - {label: Africa/Niamey, value: Africa/Niamey, countries: [NE]}
+    - {label: Africa/Nouakchott, value: Africa/Nouakchott, countries: [MR]}
+    - {label: Africa/Ouagadougou, value: Africa/Ouagadougou, countries: [BF]}
+    - {label: Africa/Porto-Novo, value: Africa/Porto-Novo, countries: [BJ]}
+    - {label: Africa/Sao_Tome, value: Africa/Sao_Tome, countries: [ST]}
+    - {label: Africa/Tripoli, value: Africa/Tripoli, countries: [LY]}
+    - {label: Africa/Tunis, value: Africa/Tunis, countries: [TN]}
+    - {label: Africa/Windhoek, value: Africa/Windhoek, countries: [NA]}
+    - {label: America/Adak, value: America/Adak, countries: [US]}
+    - {label: America/Anchorage, value: America/Anchorage, countries: [US]}
+    - {label: America/Anguilla, value: America/Anguilla, countries: [AI]}
+    - {label: America/Antigua, value: America/Antigua, countries: [AG]}
+    - {label: America/Araguaina, value: America/Araguaina, countries: [BR]}
+    - {label: America/Argentina/Buenos_Aires, value: America/Argentina/Buenos_Aires, countries: [AR]}
+    - {label: America/Argentina/Catamarca, value: America/Argentina/Catamarca, countries: [AR]}
+    - {label: America/Argentina/Cordoba, value: America/Argentina/Cordoba, countries: [AR]}
+    - {label: America/Argentina/Jujuy, value: America/Argentina/Jujuy, countries: [AR]}
+    - {label: America/Argentina/La_Rioja, value: America/Argentina/La_Rioja, countries: [AR]}
+    - {label: America/Argentina/Mendoza, value: America/Argentina/Mendoza, countries: [AR]}
+    - {label: America/Argentina/Rio_Gallegos, value: America/Argentina/Rio_Gallegos, countries: [AR]}
+    - {label: America/Argentina/Salta, value: America/Argentina/Salta, countries: [AR]}
+    - {label: America/Argentina/San_Juan, value: America/Argentina/San_Juan, countries: [AR]}
+    - {label: America/Argentina/San_Luis, value: America/Argentina/San_Luis, countries: [AR]}
+    - {label: America/Argentina/Tucuman, value: America/Argentina/Tucuman, countries: [AR]}
+    - {label: America/Argentina/Ushuaia, value: America/Argentina/Ushuaia, countries: [AR]}
+    - {label: America/Aruba, value: America/Aruba, countries: [AW]}
+    - {label: America/Asuncion, value: America/Asuncion, countries: [PY]}
+    - {label: America/Atikokan, value: America/Atikokan, countries: [CA]}
+    - {label: America/Bahia, value: America/Bahia, countries: [BR]}
+    - {label: America/Bahia_Banderas, value: America/Bahia_Banderas, countries: [MX]}
+    - {label: America/Barbados, value: America/Barbados, countries: [BB]}
+    - {label: America/Belem, value: America/Belem, countries: [BR]}
+    - {label: America/Belize, value: America/Belize, countries: [BZ]}
+    - {label: America/Blanc-Sablon, value: America/Blanc-Sablon, countries: [CA]}
+    - {label: America/Boa_Vista, value: America/Boa_Vista, countries: [BR]}
+    - {label: America/Bogota, value: America/Bogota, countries: [CO]}
+    - {label: America/Boise, value: America/Boise, countries: [US]}
+    - {label: America/Cambridge_Bay, value: America/Cambridge_Bay, countries: [CA]}
+    - {label: America/Campo_Grande, value: America/Campo_Grande, countries: [BR]}
+    - {label: America/Cancun, value: America/Cancun, countries: [MX]}
+    - {label: America/Caracas, value: America/Caracas, countries: [VE]}
+    - {label: America/Cayenne, value: America/Cayenne, countries: [GF]}
+    - {label: America/Cayman, value: America/Cayman, countries: [KY]}
+    - {label: America/Chicago, value: America/Chicago, countries: [US]}
+    - {label: America/Chihuahua, value: America/Chihuahua, countries: [MX]}
+    - {label: America/Ciudad_Juarez, value: America/Ciudad_Juarez, countries: [MX]}
+    - {label: America/Costa_Rica, value: America/Costa_Rica, countries: [CR]}
+    - {label: America/Coyhaique, value: America/Coyhaique, countries: [CL]}
+    - {label: America/Creston, value: America/Creston, countries: [CA]}
+    - {label: America/Cuiaba, value: America/Cuiaba, countries: [BR]}
+    - {label: America/Curacao, value: America/Curacao, countries: [CW]}
+    - {label: America/Danmarkshavn, value: America/Danmarkshavn, countries: [GL]}
+    - {label: America/Dawson, value: America/Dawson, countries: [CA]}
+    - {label: America/Dawson_Creek, value: America/Dawson_Creek, countries: [CA]}
+    - {label: America/Denver, value: America/Denver, countries: [US]}
+    - {label: America/Detroit, value: America/Detroit, countries: [US]}
+    - {label: America/Dominica, value: America/Dominica, countries: [DM]}
+    - {label: America/Edmonton, value: America/Edmonton, countries: [CA]}
+    - {label: America/Eirunepe, value: America/Eirunepe, countries: [BR]}
+    - {label: America/El_Salvador, value: America/El_Salvador, countries: [SV]}
+    - {label: America/Fort_Nelson, value: America/Fort_Nelson, countries: [CA]}
+    - {label: America/Fortaleza, value: America/Fortaleza, countries: [BR]}
+    - {label: America/Glace_Bay, value: America/Glace_Bay, countries: [CA]}
+    - {label: America/Goose_Bay, value: America/Goose_Bay, countries: [CA]}
+    - {label: America/Grand_Turk, value: America/Grand_Turk, countries: [TC]}
+    - {label: America/Grenada, value: America/Grenada, countries: [GD]}
+    - {label: America/Guadeloupe, value: America/Guadeloupe, countries: [GP]}
+    - {label: America/Guatemala, value: America/Guatemala, countries: [GT]}
+    - {label: America/Guayaquil, value: America/Guayaquil, countries: [EC]}
+    - {label: America/Guyana, value: America/Guyana, countries: [GY]}
+    - {label: America/Halifax, value: America/Halifax, countries: [CA]}
+    - {label: America/Havana, value: America/Havana, countries: [CU]}
+    - {label: America/Hermosillo, value: America/Hermosillo, countries: [MX]}
+    - {label: America/Indiana/Indianapolis, value: America/Indiana/Indianapolis, countries: [US]}
+    - {label: America/Indiana/Knox, value: America/Indiana/Knox, countries: [US]}
+    - {label: America/Indiana/Marengo, value: America/Indiana/Marengo, countries: [US]}
+    - {label: America/Indiana/Petersburg, value: America/Indiana/Petersburg, countries: [US]}
+    - {label: America/Indiana/Tell_City, value: America/Indiana/Tell_City, countries: [US]}
+    - {label: America/Indiana/Vevay, value: America/Indiana/Vevay, countries: [US]}
+    - {label: America/Indiana/Vincennes, value: America/Indiana/Vincennes, countries: [US]}
+    - {label: America/Indiana/Winamac, value: America/Indiana/Winamac, countries: [US]}
+    - {label: America/Inuvik, value: America/Inuvik, countries: [CA]}
+    - {label: America/Iqaluit, value: America/Iqaluit, countries: [CA]}
+    - {label: America/Jamaica, value: America/Jamaica, countries: [JM]}
+    - {label: America/Juneau, value: America/Juneau, countries: [US]}
+    - {label: America/Kentucky/Louisville, value: America/Kentucky/Louisville, countries: [US]}
+    - {label: America/Kentucky/Monticello, value: America/Kentucky/Monticello, countries: [US]}
+    - {label: America/Kralendijk, value: America/Kralendijk, countries: [BQ]}
+    - {label: America/La_Paz, value: America/La_Paz, countries: [BO]}
+    - {label: America/Lima, value: America/Lima, countries: [PE]}
+    - {label: America/Los_Angeles, value: America/Los_Angeles, countries: [US]}
+    - {label: America/Lower_Princes, value: America/Lower_Princes, countries: [SX]}
+    - {label: America/Maceio, value: America/Maceio, countries: [BR]}
+    - {label: America/Managua, value: America/Managua, countries: [NI]}
+    - {label: America/Manaus, value: America/Manaus, countries: [BR]}
+    - {label: America/Marigot, value: America/Marigot, countries: [MF]}
+    - {label: America/Martinique, value: America/Martinique, countries: [MQ]}
+    - {label: America/Matamoros, value: America/Matamoros, countries: [MX]}
+    - {label: America/Mazatlan, value: America/Mazatlan, countries: [MX]}
+    - {label: America/Menominee, value: America/Menominee, countries: [US]}
+    - {label: America/Merida, value: America/Merida, countries: [MX]}
+    - {label: America/Metlakatla, value: America/Metlakatla, countries: [US]}
+    - {label: America/Mexico_City, value: America/Mexico_City, countries: [MX]}
+    - {label: America/Miquelon, value: America/Miquelon, countries: [PM]}
+    - {label: America/Moncton, value: America/Moncton, countries: [CA]}
+    - {label: America/Monterrey, value: America/Monterrey, countries: [MX]}
+    - {label: America/Montevideo, value: America/Montevideo, countries: [UY]}
+    - {label: America/Montserrat, value: America/Montserrat, countries: [MS]}
+    - {label: America/Nassau, value: America/Nassau, countries: [BS]}
+    - {label: America/New_York, value: America/New_York, countries: [US]}
+    - {label: America/Nome, value: America/Nome, countries: [US]}
+    - {label: America/Noronha, value: America/Noronha, countries: [BR]}
+    - {label: America/North_Dakota/Beulah, value: America/North_Dakota/Beulah, countries: [US]}
+    - {label: America/North_Dakota/Center, value: America/North_Dakota/Center, countries: [US]}
+    - {label: America/North_Dakota/New_Salem, value: America/North_Dakota/New_Salem, countries: [US]}
+    - {label: America/Nuuk, value: America/Nuuk, countries: [GL]}
+    - {label: America/Ojinaga, value: America/Ojinaga, countries: [MX]}
+    - {label: America/Panama, value: America/Panama, countries: [PA]}
+    - {label: America/Paramaribo, value: America/Paramaribo, countries: [SR]}
+    - {label: America/Phoenix, value: America/Phoenix, countries: [US]}
+    - {label: America/Port-au-Prince, value: America/Port-au-Prince, countries: [HT]}
+    - {label: America/Port_of_Spain, value: America/Port_of_Spain, countries: [TT]}
+    - {label: America/Porto_Velho, value: America/Porto_Velho, countries: [BR]}
+    - {label: America/Puerto_Rico, value: America/Puerto_Rico, countries: [PR]}
+    - {label: America/Punta_Arenas, value: America/Punta_Arenas, countries: [CL]}
+    - {label: America/Rankin_Inlet, value: America/Rankin_Inlet, countries: [CA]}
+    - {label: America/Recife, value: America/Recife, countries: [BR]}
+    - {label: America/Regina, value: America/Regina, countries: [CA]}
+    - {label: America/Resolute, value: America/Resolute, countries: [CA]}
+    - {label: America/Rio_Branco, value: America/Rio_Branco, countries: [BR]}
+    - {label: America/Santarem, value: America/Santarem, countries: [BR]}
+    - {label: America/Santiago, value: America/Santiago, countries: [CL]}
+    - {label: America/Santo_Domingo, value: America/Santo_Domingo, countries: [DO]}
+    - {label: America/Sao_Paulo, value: America/Sao_Paulo, countries: [BR]}
+    - {label: America/Scoresbysund, value: America/Scoresbysund, countries: [GL]}
+    - {label: America/Sitka, value: America/Sitka, countries: [US]}
+    - {label: America/St_Barthelemy, value: America/St_Barthelemy, countries: [BL]}
+    - {label: America/St_Johns, value: America/St_Johns, countries: [CA]}
+    - {label: America/St_Kitts, value: America/St_Kitts, countries: [KN]}
+    - {label: America/St_Lucia, value: America/St_Lucia, countries: [LC]}
+    - {label: America/St_Thomas, value: America/St_Thomas, countries: [VI]}
+    - {label: America/St_Vincent, value: America/St_Vincent, countries: [VC]}
+    - {label: America/Swift_Current, value: America/Swift_Current, countries: [CA]}
+    - {label: America/Tegucigalpa, value: America/Tegucigalpa, countries: [HN]}
+    - {label: America/Thule, value: America/Thule, countries: [GL]}
+    - {label: America/Tijuana, value: America/Tijuana, countries: [MX]}
+    - {label: America/Toronto, value: America/Toronto, countries: [CA]}
+    - {label: America/Tortola, value: America/Tortola, countries: [VG]}
+    - {label: America/Vancouver, value: America/Vancouver, countries: [CA]}
+    - {label: America/Whitehorse, value: America/Whitehorse, countries: [CA]}
+    - {label: America/Winnipeg, value: America/Winnipeg, countries: [CA]}
+    - {label: America/Yakutat, value: America/Yakutat, countries: [US]}
+    - {label: Antarctica/Casey, value: Antarctica/Casey, countries: [AQ]}
+    - {label: Antarctica/Davis, value: Antarctica/Davis, countries: [AQ]}
+    - {label: Antarctica/DumontDUrville, value: Antarctica/DumontDUrville, countries: [AQ]}
+    - {label: Antarctica/Macquarie, value: Antarctica/Macquarie, countries: [AU]}
+    - {label: Antarctica/Mawson, value: Antarctica/Mawson, countries: [AQ]}
+    - {label: Antarctica/McMurdo, value: Antarctica/McMurdo, countries: [AQ]}
+    - {label: Antarctica/Palmer, value: Antarctica/Palmer, countries: [AQ]}
+    - {label: Antarctica/Rothera, value: Antarctica/Rothera, countries: [AQ]}
+    - {label: Antarctica/Syowa, value: Antarctica/Syowa, countries: [AQ]}
+    - {label: Antarctica/Troll, value: Antarctica/Troll, countries: [AQ]}
+    - {label: Antarctica/Vostok, value: Antarctica/Vostok, countries: [AQ]}
+    - {label: Arctic/Longyearbyen, value: Arctic/Longyearbyen, countries: [SJ]}
+    - {label: Asia/Aden, value: Asia/Aden, countries: [YE]}
+    - {label: Asia/Almaty, value: Asia/Almaty, countries: [KZ]}
+    - {label: Asia/Amman, value: Asia/Amman, countries: [JO]}
+    - {label: Asia/Anadyr, value: Asia/Anadyr, countries: [RU]}
+    - {label: Asia/Aqtau, value: Asia/Aqtau, countries: [KZ]}
+    - {label: Asia/Aqtobe, value: Asia/Aqtobe, countries: [KZ]}
+    - {label: Asia/Ashgabat, value: Asia/Ashgabat, countries: [TM]}
+    - {label: Asia/Atyrau, value: Asia/Atyrau, countries: [KZ]}
+    - {label: Asia/Baghdad, value: Asia/Baghdad, countries: [IQ]}
+    - {label: Asia/Bahrain, value: Asia/Bahrain, countries: [BH]}
+    - {label: Asia/Baku, value: Asia/Baku, countries: [AZ]}
+    - {label: Asia/Bangkok, value: Asia/Bangkok, countries: [TH]}
+    - {label: Asia/Barnaul, value: Asia/Barnaul, countries: [RU]}
+    - {label: Asia/Beirut, value: Asia/Beirut, countries: [LB]}
+    - {label: Asia/Bishkek, value: Asia/Bishkek, countries: [KG]}
+    - {label: Asia/Brunei, value: Asia/Brunei, countries: [BN]}
+    - {label: Asia/Chita, value: Asia/Chita, countries: [RU]}
+    - {label: Asia/Colombo, value: Asia/Colombo, countries: [LK]}
+    - {label: Asia/Damascus, value: Asia/Damascus, countries: [SY]}
+    - {label: Asia/Dhaka, value: Asia/Dhaka, countries: [BD]}
+    - {label: Asia/Dili, value: Asia/Dili, countries: [TL]}
+    - {label: Asia/Dubai, value: Asia/Dubai, countries: [AE]}
+    - {label: Asia/Dushanbe, value: Asia/Dushanbe, countries: [TJ]}
+    - {label: Asia/Famagusta, value: Asia/Famagusta, countries: [CY]}
+    - {label: Asia/Gaza, value: Asia/Gaza, countries: [PS]}
+    - {label: Asia/Hebron, value: Asia/Hebron, countries: [PS]}
+    - {label: Asia/Ho_Chi_Minh, value: Asia/Ho_Chi_Minh, countries: [VN]}
+    - {label: Asia/Hong_Kong, value: Asia/Hong_Kong, countries: [HK]}
+    - {label: Asia/Hovd, value: Asia/Hovd, countries: [MN]}
+    - {label: Asia/Irkutsk, value: Asia/Irkutsk, countries: [RU]}
+    - {label: Asia/Jakarta, value: Asia/Jakarta, countries: [ID]}
+    - {label: Asia/Jayapura, value: Asia/Jayapura, countries: [ID]}
+    - {label: Asia/Jerusalem, value: Asia/Jerusalem, countries: [IL]}
+    - {label: Asia/Kabul, value: Asia/Kabul, countries: [AF]}
+    - {label: Asia/Kamchatka, value: Asia/Kamchatka, countries: [RU]}
+    - {label: Asia/Karachi, value: Asia/Karachi, countries: [PK]}
+    - {label: Asia/Kathmandu, value: Asia/Kathmandu, countries: [NP]}
+    - {label: Asia/Khandyga, value: Asia/Khandyga, countries: [RU]}
+    - {label: Asia/Kolkata, value: Asia/Kolkata, countries: [IN]}
+    - {label: Asia/Krasnoyarsk, value: Asia/Krasnoyarsk, countries: [RU]}
+    - {label: Asia/Kuala_Lumpur, value: Asia/Kuala_Lumpur, countries: [MY]}
+    - {label: Asia/Kuching, value: Asia/Kuching, countries: [MY]}
+    - {label: Asia/Kuwait, value: Asia/Kuwait, countries: [KW]}
+    - {label: Asia/Macau, value: Asia/Macau, countries: [MO]}
+    - {label: Asia/Magadan, value: Asia/Magadan, countries: [RU]}
+    - {label: Asia/Makassar, value: Asia/Makassar, countries: [ID]}
+    - {label: Asia/Manila, value: Asia/Manila, countries: [PH]}
+    - {label: Asia/Muscat, value: Asia/Muscat, countries: [OM]}
+    - {label: Asia/Nicosia, value: Asia/Nicosia, countries: [CY]}
+    - {label: Asia/Novokuznetsk, value: Asia/Novokuznetsk, countries: [RU]}
+    - {label: Asia/Novosibirsk, value: Asia/Novosibirsk, countries: [RU]}
+    - {label: Asia/Omsk, value: Asia/Omsk, countries: [RU]}
+    - {label: Asia/Oral, value: Asia/Oral, countries: [KZ]}
+    - {label: Asia/Phnom_Penh, value: Asia/Phnom_Penh, countries: [KH]}
+    - {label: Asia/Pontianak, value: Asia/Pontianak, countries: [ID]}
+    - {label: Asia/Pyongyang, value: Asia/Pyongyang, countries: [KP]}
+    - {label: Asia/Qatar, value: Asia/Qatar, countries: [QA]}
+    - {label: Asia/Qostanay, value: Asia/Qostanay, countries: [KZ]}
+    - {label: Asia/Qyzylorda, value: Asia/Qyzylorda, countries: [KZ]}
+    - {label: Asia/Riyadh, value: Asia/Riyadh, countries: [SA]}
+    - {label: Asia/Sakhalin, value: Asia/Sakhalin, countries: [RU]}
+    - {label: Asia/Samarkand, value: Asia/Samarkand, countries: [UZ]}
+    - {label: Asia/Seoul, value: Asia/Seoul, countries: [KR]}
+    - {label: Asia/Shanghai, value: Asia/Shanghai, countries: [CN]}
+    - {label: Asia/Singapore, value: Asia/Singapore, countries: [SG]}
+    - {label: Asia/Srednekolymsk, value: Asia/Srednekolymsk, countries: [RU]}
+    - {label: Asia/Taipei, value: Asia/Taipei, countries: [TW]}
+    - {label: Asia/Tashkent, value: Asia/Tashkent, countries: [UZ]}
+    - {label: Asia/Tbilisi, value: Asia/Tbilisi, countries: [GE]}
+    - {label: Asia/Tehran, value: Asia/Tehran, countries: [IR]}
+    - {label: Asia/Thimphu, value: Asia/Thimphu, countries: [BT]}
+    - {label: Asia/Tokyo, value: Asia/Tokyo, countries: [JP]}
+    - {label: Asia/Tomsk, value: Asia/Tomsk, countries: [RU]}
+    - {label: Asia/Ulaanbaatar, value: Asia/Ulaanbaatar, countries: [MN]}
+    - {label: Asia/Urumqi, value: Asia/Urumqi, countries: [CN]}
+    - {label: Asia/Ust-Nera, value: Asia/Ust-Nera, countries: [RU]}
+    - {label: Asia/Vientiane, value: Asia/Vientiane, countries: [LA]}
+    - {label: Asia/Vladivostok, value: Asia/Vladivostok, countries: [RU]}
+    - {label: Asia/Yakutsk, value: Asia/Yakutsk, countries: [RU]}
+    - {label: Asia/Yangon, value: Asia/Yangon, countries: [MM]}
+    - {label: Asia/Yekaterinburg, value: Asia/Yekaterinburg, countries: [RU]}
+    - {label: Asia/Yerevan, value: Asia/Yerevan, countries: [AM]}
+    - {label: Atlantic/Azores, value: Atlantic/Azores, countries: [PT]}
+    - {label: Atlantic/Bermuda, value: Atlantic/Bermuda, countries: [BM]}
+    - {label: Atlantic/Canary, value: Atlantic/Canary, countries: [ES]}
+    - {label: Atlantic/Cape_Verde, value: Atlantic/Cape_Verde, countries: [CV]}
+    - {label: Atlantic/Faroe, value: Atlantic/Faroe, countries: [FO]}
+    - {label: Atlantic/Madeira, value: Atlantic/Madeira, countries: [PT]}
+    - {label: Atlantic/Reykjavik, value: Atlantic/Reykjavik, countries: [IS]}
+    - {label: Atlantic/South_Georgia, value: Atlantic/South_Georgia, countries: [GS]}
+    - {label: Atlantic/St_Helena, value: Atlantic/St_Helena, countries: [SH]}
+    - {label: Atlantic/Stanley, value: Atlantic/Stanley, countries: [FK]}
+    - {label: Australia/Adelaide, value: Australia/Adelaide, countries: [AU]}
+    - {label: Australia/Brisbane, value: Australia/Brisbane, countries: [AU]}
+    - {label: Australia/Broken_Hill, value: Australia/Broken_Hill, countries: [AU]}
+    - {label: Australia/Canberra, value: Australia/Canberra, countries: [AU]}
+    - {label: Australia/Darwin, value: Australia/Darwin, countries: [AU]}
+    - {label: Australia/Eucla, value: Australia/Eucla, countries: [AU]}
+    - {label: Australia/Hobart, value: Australia/Hobart, countries: [AU]}
+    - {label: Australia/Lindeman, value: Australia/Lindeman, countries: [AU]}
+    - {label: Australia/Lord_Howe, value: Australia/Lord_Howe, countries: [AU]}
+    - {label: Australia/Melbourne, value: Australia/Melbourne, countries: [AU]}
+    - {label: Australia/Perth, value: Australia/Perth, countries: [AU]}
+    - {label: Australia/Sydney, value: Australia/Sydney, countries: [AU]}
+    - {label: Australia/Yancowinna, value: Australia/Yancowinna, countries: [AU]}
+    - {label: Europe/Amsterdam, value: Europe/Amsterdam, countries: [NL]}
+    - {label: Europe/Andorra, value: Europe/Andorra, countries: [AD]}
+    - {label: Europe/Astrakhan, value: Europe/Astrakhan, countries: [RU]}
+    - {label: Europe/Athens, value: Europe/Athens, countries: [GR]}
+    - {label: Europe/Belgrade, value: Europe/Belgrade, countries: [RS]}
+    - {label: Europe/Berlin, value: Europe/Berlin, countries: [DE]}
+    - {label: Europe/Bratislava, value: Europe/Bratislava, countries: [SK]}
+    - {label: Europe/Brussels, value: Europe/Brussels, countries: [BE]}
+    - {label: Europe/Bucharest, value: Europe/Bucharest, countries: [RO]}
+    - {label: Europe/Budapest, value: Europe/Budapest, countries: [HU]}
+    - {label: Europe/Busingen, value: Europe/Busingen, countries: [DE]}
+    - {label: Europe/Chisinau, value: Europe/Chisinau, countries: [MD]}
+    - {label: Europe/Copenhagen, value: Europe/Copenhagen, countries: [DK]}
+    - {label: Europe/Dublin, value: Europe/Dublin, countries: [IE]}
+    - {label: Europe/Gibraltar, value: Europe/Gibraltar, countries: [GI]}
+    - {label: Europe/Guernsey, value: Europe/Guernsey, countries: [GG]}
+    - {label: Europe/Helsinki, value: Europe/Helsinki, countries: [FI]}
+    - {label: Europe/Isle_of_Man, value: Europe/Isle_of_Man, countries: [IM]}
+    - {label: Europe/Istanbul, value: Europe/Istanbul, countries: [TR]}
+    - {label: Europe/Jersey, value: Europe/Jersey, countries: [JE]}
+    - {label: Europe/Kaliningrad, value: Europe/Kaliningrad, countries: [RU]}
+    - {label: Europe/Kirov, value: Europe/Kirov, countries: [RU]}
+    - {label: Europe/Kyiv, value: Europe/Kyiv, countries: [UA]}
+    - {label: Europe/Lisbon, value: Europe/Lisbon, countries: [PT]}
+    - {label: Europe/Ljubljana, value: Europe/Ljubljana, countries: [SI]}
+    - {label: Europe/London, value: Europe/London, countries: [GB]}
+    - {label: Europe/Luxembourg, value: Europe/Luxembourg, countries: [LU]}
+    - {label: Europe/Madrid, value: Europe/Madrid, countries: [ES]}
+    - {label: Europe/Malta, value: Europe/Malta, countries: [MT]}
+    - {label: Europe/Mariehamn, value: Europe/Mariehamn, countries: [AX]}
+    - {label: Europe/Minsk, value: Europe/Minsk, countries: [BY]}
+    - {label: Europe/Monaco, value: Europe/Monaco, countries: [MC]}
+    - {label: Europe/Moscow, value: Europe/Moscow, countries: [RU]}
+    - {label: Europe/Oslo, value: Europe/Oslo, countries: ['NO', SJ]}
+    - {label: Europe/Paris, value: Europe/Paris, countries: [FR]}
+    - {label: Europe/Podgorica, value: Europe/Podgorica, countries: [ME]}
+    - {label: Europe/Prague, value: Europe/Prague, countries: [CZ]}
+    - {label: Europe/Riga, value: Europe/Riga, countries: [LV]}
+    - {label: Europe/Rome, value: Europe/Rome, countries: [IT]}
+    - {label: Europe/Samara, value: Europe/Samara, countries: [RU]}
+    - {label: Europe/San_Marino, value: Europe/San_Marino, countries: [SM]}
+    - {label: Europe/Sarajevo, value: Europe/Sarajevo, countries: [BA]}
+    - {label: Europe/Saratov, value: Europe/Saratov, countries: [RU]}
+    - {label: Europe/Simferopol, value: Europe/Simferopol, countries: [UA]}
+    - {label: Europe/Skopje, value: Europe/Skopje, countries: [MK]}
+    - {label: Europe/Sofia, value: Europe/Sofia, countries: [BG]}
+    - {label: Europe/Stockholm, value: Europe/Stockholm, countries: [SE]}
+    - {label: Europe/Tallinn, value: Europe/Tallinn, countries: [EE]}
+    - {label: Europe/Tirane, value: Europe/Tirane, countries: [AL]}
+    - {label: Europe/Ulyanovsk, value: Europe/Ulyanovsk, countries: [RU]}
+    - {label: Europe/Vaduz, value: Europe/Vaduz, countries: [LI]}
+    - {label: Europe/Vatican, value: Europe/Vatican, countries: [VA]}
+    - {label: Europe/Vienna, value: Europe/Vienna, countries: [AT]}
+    - {label: Europe/Vilnius, value: Europe/Vilnius, countries: [LT]}
+    - {label: Europe/Volgograd, value: Europe/Volgograd, countries: [RU]}
+    - {label: Europe/Warsaw, value: Europe/Warsaw, countries: [PL]}
+    - {label: Europe/Zagreb, value: Europe/Zagreb, countries: [HR]}
+    - {label: Europe/Zurich, value: Europe/Zurich, countries: [CH]}
+    - {label: Indian/Antananarivo, value: Indian/Antananarivo, countries: [MG]}
+    - {label: Indian/Chagos, value: Indian/Chagos, countries: [IO]}
+    - {label: Indian/Christmas, value: Indian/Christmas, countries: [CX]}
+    - {label: Indian/Cocos, value: Indian/Cocos, countries: [CC]}
+    - {label: Indian/Comoro, value: Indian/Comoro, countries: [KM]}
+    - {label: Indian/Kerguelen, value: Indian/Kerguelen, countries: [TF]}
+    - {label: Indian/Mahe, value: Indian/Mahe, countries: [SC]}
+    - {label: Indian/Maldives, value: Indian/Maldives, countries: [MV]}
+    - {label: Indian/Mauritius, value: Indian/Mauritius, countries: [MU]}
+    - {label: Indian/Mayotte, value: Indian/Mayotte, countries: [YT]}
+    - {label: Indian/Reunion, value: Indian/Reunion, countries: [RE]}
+    - {label: Pacific/Apia, value: Pacific/Apia, countries: [WS]}
+    - {label: Pacific/Auckland, value: Pacific/Auckland, countries: [NZ]}
+    - {label: Pacific/Bougainville, value: Pacific/Bougainville, countries: [PG]}
+    - {label: Pacific/Chatham, value: Pacific/Chatham, countries: [NZ]}
+    - {label: Pacific/Chuuk, value: Pacific/Chuuk, countries: [FM]}
+    - {label: Pacific/Easter, value: Pacific/Easter, countries: [CL]}
+    - {label: Pacific/Efate, value: Pacific/Efate, countries: [VU]}
+    - {label: Pacific/Fakaofo, value: Pacific/Fakaofo, countries: [TK]}
+    - {label: Pacific/Fiji, value: Pacific/Fiji, countries: [FJ]}
+    - {label: Pacific/Funafuti, value: Pacific/Funafuti, countries: [TV]}
+    - {label: Pacific/Galapagos, value: Pacific/Galapagos, countries: [EC]}
+    - {label: Pacific/Gambier, value: Pacific/Gambier, countries: [PF]}
+    - {label: Pacific/Guadalcanal, value: Pacific/Guadalcanal, countries: [SB]}
+    - {label: Pacific/Guam, value: Pacific/Guam, countries: [GU]}
+    - {label: Pacific/Honolulu, value: Pacific/Honolulu, countries: [US]}
+    - {label: Pacific/Johnston, value: Pacific/Johnston, countries: [UM]}
+    - {label: Pacific/Kanton, value: Pacific/Kanton, countries: [KI]}
+    - {label: Pacific/Kiritimati, value: Pacific/Kiritimati, countries: [KI]}
+    - {label: Pacific/Kosrae, value: Pacific/Kosrae, countries: [FM]}
+    - {label: Pacific/Kwajalein, value: Pacific/Kwajalein, countries: [MH]}
+    - {label: Pacific/Majuro, value: Pacific/Majuro, countries: [MH]}
+    - {label: Pacific/Marquesas, value: Pacific/Marquesas, countries: [PF]}
+    - {label: Pacific/Midway, value: Pacific/Midway, countries: [UM]}
+    - {label: Pacific/Nauru, value: Pacific/Nauru, countries: [NR]}
+    - {label: Pacific/Niue, value: Pacific/Niue, countries: [NU]}
+    - {label: Pacific/Norfolk, value: Pacific/Norfolk, countries: [NF]}
+    - {label: Pacific/Noumea, value: Pacific/Noumea, countries: [NC]}
+    - {label: Pacific/Pago_Pago, value: Pacific/Pago_Pago, countries: [AS, US]}
+    - {label: Pacific/Palau, value: Pacific/Palau, countries: [PW]}
+    - {label: Pacific/Pitcairn, value: Pacific/Pitcairn, countries: [PN]}
+    - {label: Pacific/Pohnpei, value: Pacific/Pohnpei, countries: [FM]}
+    - {label: Pacific/Port_Moresby, value: Pacific/Port_Moresby, countries: [PG]}
+    - {label: Pacific/Rarotonga, value: Pacific/Rarotonga, countries: [CK]}
+    - {label: Pacific/Saipan, value: Pacific/Saipan, countries: [MP]}
+    - {label: Pacific/Tahiti, value: Pacific/Tahiti, countries: [PF]}
+    - {label: Pacific/Tarawa, value: Pacific/Tarawa, countries: [KI]}
+    - {label: Pacific/Tongatapu, value: Pacific/Tongatapu, countries: [TO]}
+    - {label: Pacific/Wake, value: Pacific/Wake, countries: [UM]}
+    - {label: Pacific/Wallis, value: Pacific/Wallis, countries: [WF]}
+    - {label: Pacific/Yap, value: Pacific/Yap, countries: [FM]}
+    - {label: UTC, value: UTC, countries: []}
+  partition_recipes:
+    - {label: すべてを1つのパーティションに配置, value: atomic}
+    - {label: /homeを分離, value: home}
+    - {label: /home・/var・/tmpを分離, value: multi}
+    - {label: /var・/srvを分離（swapは最大1GB）, value: server}
+    - {label: 小容量ディスク向け（10GB未満）, value: small_disk}
+  reserved_usernames:
+    - {label: root, value: root}
+    - {label: daemon, value: daemon}
+    - {label: bin, value: bin}
+    - {label: sys, value: sys}
+    - {label: sync, value: sync}
+    - {label: games, value: games}
+    - {label: man, value: man}
+    - {label: lp, value: lp}
+    - {label: mail, value: mail}
+    - {label: news, value: news}
+    - {label: uucp, value: uucp}
+    - {label: proxy, value: proxy}
+    - {label: www-data, value: www-data}
+    - {label: backup, value: backup}
+    - {label: list, value: list}
+    - {label: irc, value: irc}
+    - {label: gnats, value: gnats}
+    - {label: nobody, value: nobody}
+    - {label: adm, value: adm}
+    - {label: tty, value: tty}
+    - {label: disk, value: disk}
+    - {label: kmem, value: kmem}
+    - {label: dialout, value: dialout}
+    - {label: fax, value: fax}
+    - {label: voice, value: voice}
+    - {label: cdrom, value: cdrom}
+    - {label: floppy, value: floppy}
+    - {label: tape, value: tape}
+    - {label: sudo, value: sudo}
+    - {label: audio, value: audio}
+    - {label: dip, value: dip}
+    - {label: operator, value: operator}
+    - {label: src, value: src}
+    - {label: shadow, value: shadow}
+    - {label: utmp, value: utmp}
+    - {label: video, value: video}
+    - {label: sasl, value: sasl}
+    - {label: plugdev, value: plugdev}
+    - {label: staff, value: staff}
+    - {label: users, value: users}
+    - {label: nogroup, value: nogroup}
+    - {label: netplan, value: netplan}
+    - {label: ftn, value: ftn}
+    - {label: mysql, value: mysql}
+    - {label: tac-plus, value: tac-plus}
+    - {label: alias, value: alias}
+    - {label: qmail, value: qmail}
+    - {label: qmaild, value: qmaild}
+    - {label: qmails, value: qmails}
+    - {label: qmailr, value: qmailr}
+    - {label: qmailq, value: qmailq}
+    - {label: qmaill, value: qmaill}
+    - {label: qmailp, value: qmailp}
+    - {label: asterisk, value: asterisk}
+    - {label: vpopmail, value: vpopmail}
+    - {label: vchkpw, value: vchkpw}
+    - {label: slurm, value: slurm}
+    - {label: hacluster, value: hacluster}
+    - {label: haclient, value: haclient}
+    - {label: grsec-tpe, value: grsec-tpe}
+    - {label: grsec-sock-all, value: grsec-sock-all}
+    - {label: grsec-sock-clt, value: grsec-sock-clt}
+    - {label: grsec-sock-srv, value: grsec-sock-srv}
+    - {label: grsec-proc, value: grsec-proc}
+    - {label: ceph, value: ceph}
+    - {label: opensrf, value: opensrf}
+    - {label: libvirt-qemu, value: libvirt-qemu}
+    - {label: admin, value: admin}
+    - {label: Debian-exim, value: Debian-exim}
+    - {label: bind, value: bind}
+    - {label: crontab, value: crontab}
+    - {label: cupsys, value: cupsys}
+    - {label: dcc, value: dcc}
+    - {label: dhcp, value: dhcp}
+    - {label: dictd, value: dictd}
+    - {label: dnsmasq, value: dnsmasq}
+    - {label: dovecot, value: dovecot}
+    - {label: fetchmail, value: fetchmail}
+    - {label: firebird, value: firebird}
+    - {label: ftp, value: ftp}
+    - {label: fuse, value: fuse}
+    - {label: gdm, value: gdm}
+    - {label: haldaemon, value: haldaemon}
+    - {label: hplilp, value: hplilp}
+    - {label: identd, value: identd}
+    - {label: input, value: input}
+    - {label: jwhois, value: jwhois}
+    - {label: klog, value: klog}
+    - {label: kvm, value: kvm}
+    - {label: lpadmin, value: lpadmin}
+    - {label: messagebus, value: messagebus}
+    - {label: mythtv, value: mythtv}
+    - {label: netdev, value: netdev}
+    - {label: powerdev, value: powerdev}
+    - {label: radvd, value: radvd}
+    - {label: render, value: render}
+    - {label: saned, value: saned}
+    - {label: sbuild, value: sbuild}
+    - {label: scanner, value: scanner}
+    - {label: slocate, value: slocate}
+    - {label: ssh, value: ssh}
+    - {label: sshd, value: sshd}
+    - {label: ssl-cert, value: ssl-cert}
+    - {label: sslwrap, value: sslwrap}
+    - {label: statd, value: statd}
+    - {label: syslog, value: syslog}
+    - {label: telnetd, value: telnetd}
+    - {label: tftpd, value: tftpd}
