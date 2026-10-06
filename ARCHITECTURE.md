@@ -5,6 +5,7 @@
 | YAML読み込み           | `go.yaml.in/yaml/v4`                               |
 | ---------------------- | -------------------------------------------------- |
 | 質問・入出力           | `bufio`, `fmt`, `os`, `flag`, `strconv`, `strings` |
+| TUI                    | `charm.land/huh/v2`                                |
 | パスワード入力の非表示 | `golang.org/x/term`                                |
 | preseedテキスト生成    | `text/template`                                    |
 | YAMLをexeに埋め込み    | `embed`                                            |
